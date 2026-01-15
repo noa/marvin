@@ -280,7 +280,7 @@ def invoke_gemini(data_dir: Path, prompt: str) -> int:
     """Invoke Gemini CLI with the given prompt. Returns exit code."""
     try:
         result = subprocess.run(
-            ["gemini", "-C", str(data_dir), prompt],
+            ["gemini", prompt],
             cwd=data_dir,
         )
         return result.returncode
