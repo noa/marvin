@@ -1,0 +1,14 @@
+{
+    "tools": {
+        "core": [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob",
+            "grep",
+            "ls",
+            "read_many_files"
+        ],
+        "sandbox": false
+    }
+}
