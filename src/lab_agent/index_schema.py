@@ -3,63 +3,41 @@
 Generates .index.yaml with task counts and metadata for efficient LLM navigation.
 """
 
-import re
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from lab_agent.task_schema import load_task_file
+
 
 def parse_task_file(file_path: Path) -> dict[str, Any]:
-    """Parse a task file and extract metadata.
+    """Parse a task JSON file and extract metadata.
     
     Returns:
-        dict with task_count, open_count, waiting_count, overdue_count, next_deadline
+        dict with task_count, open_count, waiting_count, overdue_count, next_deadline, priority
     """
-    content = file_path.read_text()
-    
-    # Count tasks
-    open_tasks = len(re.findall(r'^- \[ \]', content, re.MULTILINE))
-    completed_tasks = len(re.findall(r'^- \[x\]', content, re.MULTILINE | re.IGNORECASE))
-    waiting_count = len(re.findall(r'@waiting\([^)]+\)', content))
-    
-    # Find deadlines
-    deadline_pattern = r'@deadline\((\d{4}-\d{2}-\d{2})\)'
-    deadlines = re.findall(deadline_pattern, content)
-    
-    today = date.today()
-    overdue_count = 0
-    next_deadline = None
-    
-    for d in deadlines:
-        try:
-            deadline_date = datetime.strptime(d, '%Y-%m-%d').date()
-            if deadline_date < today:
-                overdue_count += 1
-            elif next_deadline is None or deadline_date < next_deadline:
-                next_deadline = deadline_date
-        except ValueError:
-            pass
-    
-    # Extract priority from frontmatter
-    priority = 'medium'
-    frontmatter_match = re.match(r'^---\n(.+?)\n---', content, re.DOTALL)
-    if frontmatter_match:
-        try:
-            fm = yaml.safe_load(frontmatter_match.group(1))
-            if isinstance(fm, dict):
-                priority = fm.get('priority', 'medium')
-        except yaml.YAMLError:
-            pass
+    try:
+        tf = load_task_file(file_path)
+    except Exception:
+        # Return empty stats for invalid files
+        return {
+            'task_count': 0,
+            'open_count': 0,
+            'waiting_count': 0,
+            'overdue_count': 0,
+            'next_deadline': None,
+            'priority': 'medium',
+        }
     
     return {
-        'task_count': open_tasks + completed_tasks,
-        'open_count': open_tasks,
-        'waiting_count': waiting_count,
-        'overdue_count': overdue_count,
-        'next_deadline': next_deadline.isoformat() if next_deadline else None,
-        'priority': priority,
+        'task_count': len(tf.tasks),
+        'open_count': tf.open_count,
+        'waiting_count': tf.waiting_count,
+        'overdue_count': tf.overdue_count,
+        'next_deadline': tf.next_deadline.isoformat() if tf.next_deadline else None,
+        'priority': 'medium',  # Could be read from a project config later
     }
 
 
@@ -74,7 +52,7 @@ def rebuild_index(data_dir: Path) -> None:
     # Scan projects directory
     projects_dir = data_dir / 'projects'
     if projects_dir.exists():
-        for tasks_file in projects_dir.rglob('tasks.md'):
+        for tasks_file in projects_dir.rglob('tasks.json'):
             rel_path = tasks_file.relative_to(data_dir)
             project_name = str(rel_path.parent.relative_to('projects'))
             
@@ -94,7 +72,7 @@ def rebuild_index(data_dir: Path) -> None:
     
     # Parse inbox
     inbox_stats = {'task_count': 0, 'open_count': 0}
-    inbox_path = data_dir / 'inbox.md'
+    inbox_path = data_dir / 'inbox.json'
     if inbox_path.exists():
         stats = parse_task_file(inbox_path)
         inbox_stats = {

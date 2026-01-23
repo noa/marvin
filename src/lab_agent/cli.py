@@ -10,6 +10,10 @@ from pathlib import Path
 import click
 
 from lab_agent.index_schema import rebuild_index
+from lab_agent.task_schema import validate_all_task_files
+from lab_agent import fast_path
+from lab_agent import llm_parse
+from lab_agent import styles
 
 # Default data directory: worktree checked out to ~/.lab-agent/data
 DEFAULT_DATA_DIR = Path.home() / ".lab-agent" / "data"
@@ -296,6 +300,35 @@ def git_sync_after(data_dir: Path, message: str) -> bool:
         return False
 
 
+def validate_after_llm(data_dir: Path) -> bool:
+    """Validate all JSON task files after LLM edits.
+    
+    Returns True if all files are valid. If invalid, reverts changes
+    and returns False.
+    """
+    errors = validate_all_task_files(data_dir)
+    
+    if errors:
+        click.echo("\n❌ LLM produced invalid JSON:", err=True)
+        for path, error in errors:
+            rel_path = path.relative_to(data_dir)
+            click.echo(f"\n  {rel_path}:", err=True)
+            # Show first few lines of error
+            for line in str(error).split('\n')[:5]:
+                click.echo(f"    {line}", err=True)
+        
+        # Revert changes
+        click.echo("\nReverting changes...", err=True)
+        subprocess.run(
+            ["git", "checkout", "."],
+            cwd=data_dir,
+            capture_output=True,
+        )
+        return False
+    
+    return True
+
+
 def invoke_gemini(data_dir: Path, prompt: str) -> int:
     """Invoke Gemini CLI with the given prompt. Returns exit code."""
     stop_spinner = threading.Event()
@@ -313,19 +346,74 @@ def invoke_gemini(data_dir: Path, prompt: str) -> int:
         sys.stderr.write("\r" + " " * 20 + "\r")
         sys.stderr.flush()
     
+    # Patterns to filter from output (both stdout and stderr)
+    noise_patterns = [
+        "Thinking...",
+        "status: 503",
+        "ApiError:",
+        "at async",
+        "at throwErrorIfNotOK",
+        "at process.processTicksAndRejections",
+        "Retrying with backoff",
+        "Tool execution denied",
+        'Tool "',
+        "not found in registry",
+        "[ERROR]",
+        "node_modules/@google",
+        "Attempt ",
+        "[Routing]",
+        "ClassifierStrategy",
+        "Max attempts reached",
+        "I will ",  # Filter LLM thinking-out-loud
+    ]
+    
+    # Spinner character pattern (Unicode braille)
+    spinner_chars = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+    
+    def is_noise(line: str) -> bool:
+        """Check if a line is noisy output that should be filtered."""
+        stripped = line.strip()
+        # Filter empty lines
+        if not stripped:
+            return True
+        # Filter lines starting with spinner chars
+        if stripped and stripped[0] in spinner_chars:
+            return True
+        # Filter known noise patterns
+        return any(pattern in line for pattern in noise_patterns)
+    
     try:
         # Start spinner in background
         spinner_thread = threading.Thread(target=spinner, daemon=True)
         spinner_thread.start()
         
+        # Capture both stdout and stderr to filter noise
         result = subprocess.run(
             ["gemini", prompt],
             cwd=data_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         
         # Stop spinner
         stop_spinner.set()
         spinner_thread.join(timeout=0.5)
+        
+        # Filter and display non-noisy stdout
+        if result.stdout:
+            clean_lines = [
+                line for line in result.stdout.splitlines()
+                if not is_noise(line)
+            ]
+            if clean_lines:
+                click.echo("\n".join(clean_lines))
+        
+        # Filter and display non-noisy stderr (errors only)
+        if result.stderr:
+            for line in result.stderr.splitlines():
+                if not is_noise(line):
+                    click.echo(line, err=True)
         
         return result.returncode
     except FileNotFoundError:
@@ -335,22 +423,17 @@ def invoke_gemini(data_dir: Path, prompt: str) -> int:
 
 
 @click.group(invoke_without_command=True)
-@click.argument("task", nargs=-1)
 @click.pass_context
-def main(ctx: click.Context, task: tuple[str, ...]) -> None:
+def main(ctx: click.Context) -> None:
     """Lab Agent - Git-backed task assistant.
     
-    Quick capture: la "remind me to check Sarah's draft"
+    Quick capture: la add "remind me to check Sarah's draft"
     
     First time? Run: la setup
     """
     if ctx.invoked_subcommand is None:
-        if task:
-            # Shorthand: treat as add command
-            ctx.invoke(add, task=" ".join(task))
-        else:
-            # No args, show today's tasks
-            ctx.invoke(list_tasks)
+        # No subcommand and no args, show today's tasks
+        ctx.invoke(list_tasks)
 
 
 @main.command("setup")
@@ -376,27 +459,84 @@ def setup(force: bool) -> None:
 @main.command("add")
 @click.argument("task")
 @click.option("-p", "--project", help="Add to specific project")
-def add(task: str, project: str | None) -> None:
-    """Add a task to inbox or a specific project."""
+@click.option("--no-llm", is_flag=True, help="Skip LLM, use regex parsing only (faster)")
+def add(task: str, project: str | None, no_llm: bool) -> None:
+    """Add a task to inbox or a specific project (hybrid: LLM parses, Python writes)."""
     if not ensure_setup():
         sys.exit(1)
     
     data_dir = get_data_dir()
     git_sync_before(data_dir)
     
-    if project:
-        prompt = f"Add this task to project '{project}': {task}"
-    else:
-        prompt = f"Add this task to inbox.md: {task}"
+    try:
+        # Use hybrid approach: LLM parses NL, Python writes file
+        new_task = llm_parse.add_task(
+            data_dir,
+            task,
+            project=project,
+            use_llm=not no_llm,
+        )
+        styles.print_success(f"Added: {new_task.description}")
+        if new_task.deadline:
+            styles.console.print(styles.format_deadline(new_task.deadline))
+        if new_task.waiting_on:
+            styles.console.print(styles.format_waiting(new_task.waiting_on))
+    except Exception as e:
+        styles.print_error(f"Error adding task: {e}")
+        sys.exit(1)
     
-    invoke_gemini(data_dir, prompt)
     git_sync_after(data_dir, task)
+
+
+@main.command("research")
+@click.argument("query")
+@click.option("-p", "--project", help="Add tasks to specific project")
+def research(query: str, project: str | None) -> None:
+    """Search the web for deadlines and create tasks.
+    
+    Examples:
+    
+      la research "ICML 2026 deadlines"
+      
+      la research "NeurIPS 2026 submission dates" -p conferences
+    """
+    if not ensure_setup():
+        sys.exit(1)
+    
+    data_dir = get_data_dir()
+    git_sync_before(data_dir)
+    
+    styles.console.print(f"[bold cyan]🔍 Searching:[/bold cyan] {query}...")
+    
+    try:
+        tasks = llm_parse.research_and_add_tasks(
+            data_dir,
+            query,
+            project=project,
+        )
+        
+        if tasks:
+            styles.console.print(f"\n[green]Found {len(tasks)} deadline(s):[/green]")
+            for task in tasks:
+                styles.print_success(f"Added: {task.description}")
+                if task.deadline:
+                    styles.console.print(styles.format_deadline(task.deadline))
+        else:
+            styles.console.print("\n[dim]No deadlines found. Try a more specific query.[/dim]")
+            return
+            
+    except Exception as e:
+        styles.print_error(f"Error: {e}")
+        sys.exit(1)
+    
+    git_sync_after(data_dir, f"research: {query[:30]}")
 
 
 @main.command("list")
 @click.option("--today", is_flag=True, help="Only items due today")
 @click.option("--week", is_flag=True, help="Items due within 7 days")
 @click.option("-p", "--project", help="Filter by project")
+@click.option("-t", "--tag", help="Filter by tag (e.g., 'conference' or '#conference')")
 @click.option("--waiting", is_flag=True, help="Show @waiting items")
 @click.option("--overdue", is_flag=True, help="Show overdue items")
 @click.option("--all", "show_all", is_flag=True, help="Show all open tasks")
@@ -404,70 +544,55 @@ def list_tasks(
     today: bool,
     week: bool,
     project: str | None,
+    tag: str | None,
     waiting: bool,
     overdue: bool,
     show_all: bool,
 ) -> None:
-    """List tasks with various filters."""
+    """List tasks with various filters (fast path)."""
     if not ensure_setup():
         sys.exit(1)
     
     data_dir = get_data_dir()
     git_sync_before(data_dir)
     
-    # Build the prompt based on options
-    filters = []
-    if today:
-        filters.append("due today")
-    if week:
-        filters.append("due within the next 7 days")
-    if project:
-        filters.append(f"in project '{project}'")
-    if waiting:
-        filters.append("with @waiting tags")
-    if overdue:
-        filters.append("that are overdue")
-    if show_all:
-        filters.append("(all open tasks)")
+    # Strip # from tag if present
+    if tag and tag.startswith('#'):
+        tag = tag[1:]
     
-    if filters:
-        prompt = f"List tasks {' '.join(filters)}"
-    else:
-        prompt = "List today's tasks and any urgent items"
-    
-    invoke_gemini(data_dir, prompt)
+    # Use fast path - pure Python, no LLM
+    fast_path.list_tasks(
+        data_dir,
+        project=project,
+        tag=tag,
+        waiting=waiting,
+        overdue=overdue,
+        week=week,
+        today=today,
+        show_all=show_all,
+    )
 
 
 @main.command("brief")
-@click.option("--since", default="yesterday", help="Lookback period")
+@click.option("--since", default="yesterday", help="Lookback period (ignored in fast mode)")
 @click.option("--waiting", is_flag=True, help="Focus on who you're waiting on")
 @click.option("--deadlines", is_flag=True, help="Focus on upcoming deadlines")
 @click.option("--format", "fmt", type=click.Choice(["text", "markdown", "json"]), default="text")
 def brief(since: str, waiting: bool, deadlines: bool, fmt: str) -> None:
-    """Generate a daily briefing."""
+    """Generate a daily briefing (fast path)."""
     if not ensure_setup():
         sys.exit(1)
     
     data_dir = get_data_dir()
     git_sync_before(data_dir)
     
-    focus = []
-    if waiting:
-        focus.append("who I'm waiting on")
-    if deadlines:
-        focus.append("upcoming deadlines")
-    
-    focus_str = f" Focus on: {', '.join(focus)}." if focus else ""
-    format_str = f" Output in {fmt} format." if fmt != "text" else ""
-    
-    prompt = f"Generate a morning briefing. Look back {since}.{focus_str}{format_str}"
-    
-    invoke_gemini(data_dir, prompt)
+    # Use fast path - pure Python, no LLM
+    fast_path.show_brief(data_dir, waiting_focus=waiting)
 
 
 @main.command("search")
 @click.argument("query")
-@click.option("--semantic", is_flag=True, help="Use semantic search")
+@click.option("--semantic", is_flag=True, help="Use semantic search (requires LLM)")
 def search(query: str, semantic: bool) -> None:
     """Search across all tasks."""
     if not ensure_setup():
@@ -476,10 +601,13 @@ def search(query: str, semantic: bool) -> None:
     data_dir = get_data_dir()
     git_sync_before(data_dir)
     
-    search_type = "semantic" if semantic else "keyword"
-    prompt = f"Search for tasks matching '{query}' using {search_type} search"
-    
-    invoke_gemini(data_dir, prompt)
+    if semantic:
+        # Semantic search requires LLM
+        prompt = f"Search for tasks matching '{query}' using semantic search"
+        invoke_gemini(data_dir, prompt)
+    else:
+        # Keyword search uses fast path
+        fast_path.search_tasks(data_dir, query)
 
 
 @main.command("cleanup")
@@ -491,10 +619,112 @@ def cleanup() -> None:
     data_dir = get_data_dir()
     git_sync_before(data_dir)
     
-    prompt = "Review inbox.md and organize tasks by moving them to appropriate project files based on their content"
+    prompt = "Review inbox.json and organize tasks by moving them to appropriate project tasks.json files based on their content"
     
     invoke_gemini(data_dir, prompt)
+    
+    # Validate JSON before committing
+    if not validate_after_llm(data_dir):
+        sys.exit(1)
+    
     git_sync_after(data_dir, "organize inbox")
+
+
+@main.command("edit")
+@click.argument("task_id")
+@click.option("--add-tag", "-a", multiple=True, help="Add a tag")
+@click.option("--remove-tag", "-r", multiple=True, help="Remove a tag")
+@click.option("--deadline", "-d", help="Set deadline (YYYY-MM-DD)")
+@click.option("--no-deadline", is_flag=True, help="Clear deadline")
+@click.option("--priority", "-p", type=click.Choice(["high", "medium", "low"]), help="Set priority")
+@click.option("--waiting", "-w", help="Set waiting-on person")
+@click.option("--no-waiting", is_flag=True, help="Clear waiting-on")
+@click.option("--description", help="Set new description")
+def edit(
+    task_id: str,
+    add_tag: tuple[str, ...],
+    remove_tag: tuple[str, ...],
+    deadline: str | None,
+    no_deadline: bool,
+    priority: str | None,
+    waiting: str | None,
+    no_waiting: bool,
+    description: str | None,
+) -> None:
+    """Edit a task by ID (fast path).
+    
+    Use the 4-character ID shown in 'la list' output.
+    
+    Examples:
+    
+      la edit ae23 --add-tag conference
+      
+      la edit ae23 -a paper -a deadline
+      
+      la edit ae23 --deadline 2026-02-15
+      
+      la edit ae23 --priority high
+    """
+    if not ensure_setup():
+        sys.exit(1)
+    
+    data_dir = get_data_dir()
+    git_sync_before(data_dir)
+    
+    task = fast_path.edit_task(
+        data_dir,
+        task_id,
+        add_tags=list(add_tag) if add_tag else None,
+        remove_tags=list(remove_tag) if remove_tag else None,
+        set_deadline=deadline,
+        clear_deadline=no_deadline,
+        set_priority=priority,
+        set_waiting=waiting,
+        clear_waiting=no_waiting,
+        set_description=description,
+    )
+    
+    if task is None:
+        styles.print_error(f"Task '{task_id}' not found.")
+        sys.exit(1)
+    
+    styles.print_success(f"Updated: [{task.id[:4]}] {task.description}")
+    if task.deadline:
+        styles.console.print(styles.format_deadline(task.deadline))
+    if task.waiting_on:
+        styles.console.print(styles.format_waiting(task.waiting_on))
+    if task.tags:
+        styles.console.print(styles.format_tags(task.tags))
+    
+    git_sync_after(data_dir, f"edit {task_id}")
+
+
+@main.command("done")
+@click.argument("task_id")
+def done(task_id: str) -> None:
+    """Mark a task as done by ID (fast path).
+    
+    Use the 4-character ID shown in 'la list' output.
+    
+    Example:
+    
+      la done ae23
+    """
+    if not ensure_setup():
+        sys.exit(1)
+    
+    data_dir = get_data_dir()
+    git_sync_before(data_dir)
+    
+    task = fast_path.mark_done(data_dir, task_id)
+    
+    if task is None:
+        styles.print_error(f"Task '{task_id}' not found.")
+        sys.exit(1)
+    
+    styles.print_success(f"Done: [{task.id[:4]}] {task.description}")
+    
+    git_sync_after(data_dir, f"done {task_id}")
 
 
 @main.command("undo")
