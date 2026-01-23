@@ -310,3 +310,60 @@ if ! git diff --cached --quiet; then
     git push --quiet
 fi
 ```
+
+## (e) Mobile Access Strategy
+
+Since the entire architecture is based on **Git + Markdown**, mobile access is effectively **"solved by default"** using existing tools. We support three tiers of mobile interaction:
+
+### Level 1: Passive/Review (Git-Native Apps)
+* **Tools:** [GitJournal](https://gitjournal.io/), [Obsidian](https://obsidian.md/) (with Git plugin), or [Working Copy](https://workingcopyapp.com/).
+* **Workflow:** Sync the repo to the phone. Use the app's UI to check off tasks `[x]` or add items to `inbox.md`.
+* **Pros:** Zero new code; beautiful native UIs; offline first.
+* **Cons:** Cannot trigger the Agent (no CLI).
+
+### Level 2: Active/Agentic (Remote Terminal)
+* **Tools:** [Termux](https://termux.dev/) (Android), [Blink Shell](https://blink.sh/) (iOS).
+* **Workflow:** SSH into the lab server (or localhost via Tailscale). Run `la` commands directly.
+* **Pros:** Full power of the Agent.
+* **Cons:** Typing CLI commands on a virtual keyboard is slow.
+
+### Level 3: Voice Capture (Apple Shortcuts + SSH)
+* **Status:** ✅ Works today.
+* **Workflow:**
+    1.  **Speak:** "Hey Siri, add todo: check Sarah's draft on Friday"
+    2.  **Shortcut** uses `Dictate Text` to capture voice, then `Run Script Over SSH` to execute `la add "..."` on server.
+    3.  **Git syncs** automatically via the wrapper.
+* **Prerequisites:**
+    *   Enable Remote Login on a Mac, or use a VPS.
+    *   Use [Tailscale](https://tailscale.com) for reliable NAT-punching connectivity.
+* **Limitation:** Not agentic (raw append, no LLM parsing).
+
+### Level 4: AI Ecosystem (MCP Server)
+* **Status:** 🔮 Future (waiting for Gemini Mobile MCP support).
+* **Strategy:** Expose `lab-agent` as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server.
+* **Frontend:** Use official mobile apps for **ChatGPT, Claude, or Gemini** once they support custom MCP endpoints.
+* **Architecture:**
+    ```
+    ┌───────────────────┐    stdio     ┌──────────────────┐
+    │   Gemini CLI      │◄────────────►│  mcp_server.py   │
+    └───────────────────┘              └────────┬─────────┘
+                                                │
+                                                ▼
+                                       ┌──────────────────┐
+                                       │   Git Repo       │
+                                       └──────────────────┘
+    ```
+* **MCP Tools to Expose:** `add_task`, `list_tasks`, `search_tasks`, `get_brief`.
+* **Config (`~/.gemini/settings.json`):**
+    ```json
+    {
+      "mcpServers": {
+        "lab-agent": {
+          "command": "python",
+          "args": ["/path/to/lab_agent/mcp_server.py"]
+        }
+      }
+    }
+    ```
+* **Pros:** Full voice + agentic; LLM reasons about task context.
+* **Cons:** Requires MCP server implementation; mobile support pending.

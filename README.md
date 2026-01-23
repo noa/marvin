@@ -50,6 +50,55 @@ export LA_DATA_DIR=/path/to/your/data
 
 ---
 
+## Mobile Access (Voice Capture)
+
+Add tasks from your phone using **Siri + Apple Shortcuts**.
+
+### Prerequisites
+- A server with `la` installed (e.g., work server, VPS)
+- SSH access from your phone to that server
+- Git credentials configured on the server for push
+
+### Setup
+
+#### 1. Server Setup (one-time)
+
+SSH into your server and run:
+
+```bash
+# Clone the repo (fetches both main and data branches)
+git clone git@github.com:YOUR_USER/lab-agent.git ~/lab-agent
+cd ~/lab-agent
+
+# Install la
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# Run setup to create worktree at ~/.lab-agent/data
+la setup
+
+# Verify it works
+la list
+```
+
+> **Note:** The server needs Git push access. If using SSH keys, ensure `~/.ssh/id_ed25519` (or similar) is configured and the public key is added to your GitHub account.
+
+#### 2. iPhone Shortcut
+   
+   | Step | Action | Configuration |
+   |------|--------|---------------|
+   | 1 | **Dictate Text** | (captures your voice) |
+   | 2 | **Run Script Over SSH** | Host: `your-server.edu`<br>User: `username`<br>Auth: SSH Key<br>Script: `la add "[Dictated Text]"` |
+   | 3 | **Show Notification** | "Task added!" |
+
+3. **Add Siri phrase:** Open Shortcut settings → "Add to Siri" → say "Add todo".
+
+### Usage
+
+> "Hey Siri, add todo" → *"Check Sarah's draft on Friday"* → ✅ Task synced
+
+---
+
 <details>
 <summary><strong>Troubleshooting: Git Worktree</strong></summary>
 

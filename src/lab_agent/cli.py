@@ -3,9 +3,13 @@
 import subprocess
 import sys
 import shutil
+import threading
+import time
 from pathlib import Path
 
 import click
+
+from lab_agent.index_schema import rebuild_index
 
 # Default data directory: worktree checked out to ~/.lab-agent/data
 DEFAULT_DATA_DIR = Path.home() / ".lab-agent" / "data"
@@ -239,6 +243,12 @@ def git_sync_before(data_dir: Path) -> bool:
 def git_sync_after(data_dir: Path, message: str) -> bool:
     """Commit and push any changes. Returns True if changes were pushed."""
     try:
+        # Rebuild index before staging
+        try:
+            rebuild_index(data_dir)
+        except Exception as e:
+            click.echo(f"Warning: index rebuild failed: {e}", err=True)
+        
         # Stage all changes
         subprocess.run(
             ["git", "add", "-A"],
@@ -255,6 +265,16 @@ def git_sync_after(data_dir: Path, message: str) -> bool:
         )
         
         if result.returncode != 0:  # There are changes
+            # Show diff summary
+            diff_result = subprocess.run(
+                ["git", "diff", "--cached", "--stat"],
+                cwd=data_dir,
+                capture_output=True,
+                text=True,
+            )
+            if diff_result.stdout.strip():
+                click.echo("\n" + diff_result.stdout.strip())
+            
             # Commit
             subprocess.run(
                 ["git", "commit", "-m", f"Agent: {message[:50]}"],
@@ -278,13 +298,38 @@ def git_sync_after(data_dir: Path, message: str) -> bool:
 
 def invoke_gemini(data_dir: Path, prompt: str) -> int:
     """Invoke Gemini CLI with the given prompt. Returns exit code."""
+    stop_spinner = threading.Event()
+    
+    def spinner():
+        """Display a spinning indicator while waiting."""
+        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        i = 0
+        while not stop_spinner.is_set():
+            sys.stderr.write(f"\r{chars[i % len(chars)]} Thinking...")
+            sys.stderr.flush()
+            i += 1
+            time.sleep(0.1)
+        # Clear the spinner line
+        sys.stderr.write("\r" + " " * 20 + "\r")
+        sys.stderr.flush()
+    
     try:
+        # Start spinner in background
+        spinner_thread = threading.Thread(target=spinner, daemon=True)
+        spinner_thread.start()
+        
         result = subprocess.run(
             ["gemini", prompt],
             cwd=data_dir,
         )
+        
+        # Stop spinner
+        stop_spinner.set()
+        spinner_thread.join(timeout=0.5)
+        
         return result.returncode
     except FileNotFoundError:
+        stop_spinner.set()
         click.echo("Error: 'gemini' CLI not found. Please install the Gemini CLI.", err=True)
         return 1
 
@@ -453,42 +498,84 @@ def cleanup() -> None:
 
 
 @main.command("undo")
-def undo() -> None:
-    """Undo the last operation."""
+@click.argument("count", default=1, type=int)
+def undo(count: int) -> None:
+    """Undo the last N operations (default: 1)."""
     if not ensure_setup():
         sys.exit(1)
     
     data_dir = get_data_dir()
     
     try:
-        # Get the last commit message for display
+        # Get the commits we're about to undo
         result = subprocess.run(
-            ["git", "log", "-1", "--pretty=%s"],
+            ["git", "log", f"-{count}", "--pretty=%s"],
             cwd=data_dir,
             capture_output=True,
             text=True,
             check=True,
         )
-        last_action = result.stdout.strip()
+        actions = result.stdout.strip().split('\n')
         
-        # Revert the last commit
-        subprocess.run(
-            ["git", "revert", "--no-edit", "HEAD"],
-            cwd=data_dir,
-            check=True,
-            capture_output=True,
-        )
+        # Revert each commit in order
+        for i in range(count):
+            subprocess.run(
+                ["git", "revert", "--no-edit", f"HEAD~{i}"],
+                cwd=data_dir,
+                check=True,
+                capture_output=True,
+            )
         
-        # Push the revert
+        # Rebuild index
+        try:
+            rebuild_index(data_dir)
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=data_dir,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--amend", "--no-edit"],
+                cwd=data_dir,
+                capture_output=True,
+            )
+        except Exception:
+            pass
+        
+        # Push the reverts
         subprocess.run(
             ["git", "push", "--quiet"],
             cwd=data_dir,
             capture_output=True,
         )
         
-        click.echo(f"Undone: {last_action}")
-    except subprocess.CalledProcessError as e:
+        for action in actions:
+            click.echo(f"Undone: {action}")
+    except subprocess.CalledProcessError:
         click.echo("Failed to undo. There may be nothing to undo, or a conflict occurred.", err=True)
+
+
+@main.command("history")
+@click.option("-n", "--count", default=5, help="Number of entries to show")
+def history(count: int) -> None:
+    """Show recent operations."""
+    if not ensure_setup():
+        sys.exit(1)
+    
+    data_dir = get_data_dir()
+    
+    result = subprocess.run(
+        ["git", "log", f"-{count}", "--pretty=format:%h  %s  (%ar)"],
+        cwd=data_dir,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.stdout.strip():
+        click.echo("Recent operations:")
+        click.echo(result.stdout)
+    else:
+        click.echo("No history found.")
 
 
 @main.command("reset")
