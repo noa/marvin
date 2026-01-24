@@ -195,19 +195,23 @@ def add_task(
 # Prompt template for research (web search + task creation)
 RESEARCH_PROMPT = '''Search the web for: {query}
 
-Today's date is {today}.
+Today's date is {today}. The user's timezone is {timezone}.
 
 Based on your search results, extract any relevant deadlines, dates, or action items.
 Output a JSON array of tasks. Each task should have:
+- match_key: a stable identifier to match this deadline if we search again (e.g., "icml-2026-abstract", "neurips-2026-paper")
 - description: what needs to be done
 - deadline: date in YYYY-MM-DD format (or null if no specific date)
+- deadline_time: specific time in the user's timezone if available, e.g., "11:59 PM EST" or "23:59 UTC-5" (or null if not specified)
 - priority: "high" for imminent deadlines (within 2 weeks), "medium" otherwise
 - tags: 1-3 semantic tags (e.g., ["conference", "paper"])
 
+IMPORTANT: Look for specific deadline TIMES, not just dates. Conference deadlines often have specific times like "11:59 PM AoE" or "23:59 UTC".
+
 Output ONLY a valid JSON array, no other text. Example format:
 [
-  {{"description": "ICML 2026 abstract submission", "deadline": "2026-01-30", "priority": "high", "tags": ["conference", "deadline"]}},
-  {{"description": "ICML 2026 full paper deadline", "deadline": "2026-02-06", "priority": "high", "tags": ["conference", "paper"]}}
+  {{"match_key": "icml-2026-abstract", "description": "ICML 2026 abstract submission", "deadline": "2026-01-30", "deadline_time": "11:59 PM AoE", "priority": "high", "tags": ["conference", "deadline"]}},
+  {{"match_key": "icml-2026-paper", "description": "ICML 2026 full paper deadline", "deadline": "2026-02-06", "deadline_time": "11:59 PM AoE", "priority": "high", "tags": ["conference", "paper"]}}
 ]
 
 If no relevant deadlines found, output: []
@@ -215,12 +219,35 @@ If no relevant deadlines found, output: []
 JSON array:'''
 
 
+def get_user_timezone() -> str:
+    """Get the user's current timezone as a string like 'EST' or 'UTC-5'."""
+    import time
+    # Get timezone offset in hours
+    if time.daylight and time.localtime().tm_isdst:
+        offset_seconds = -time.altzone
+        tz_name = time.tzname[1]
+    else:
+        offset_seconds = -time.timezone
+        tz_name = time.tzname[0]
+    
+    offset_hours = offset_seconds // 3600
+    offset_sign = "+" if offset_hours >= 0 else ""
+    
+    # Return common name if available, otherwise UTC offset
+    if tz_name and tz_name not in ("", "UTC"):
+        return f"{tz_name} (UTC{offset_sign}{offset_hours})"
+    return f"UTC{offset_sign}{offset_hours}"
+
+
 def research_and_add_tasks(
     data_dir: Path,
     query: str,
     project: str | None = None,
-) -> list[Task]:
-    """Research a topic via web search and create tasks from findings.
+) -> tuple[list[Task], list[Task]]:
+    """Research a topic via web search and create/update tasks from findings.
+    
+    Uses match_key for deduplication - if a task with the same match_key
+    already exists, it will be updated rather than duplicated.
     
     Args:
         data_dir: Path to data directory
@@ -228,10 +255,11 @@ def research_and_add_tasks(
         project: Optional project to add tasks to
         
     Returns:
-        List of created Task objects
+        Tuple of (created_tasks, updated_tasks)
     """
     today = date.today().isoformat()
-    prompt = RESEARCH_PROMPT.format(query=query, today=today)
+    timezone = get_user_timezone()
+    prompt = RESEARCH_PROMPT.format(query=query, today=today, timezone=timezone)
     
     try:
         # Run Gemini with a longer timeout for web search
@@ -254,7 +282,7 @@ def research_and_add_tasks(
         parsed_tasks = json.loads(output)
         
         if not isinstance(parsed_tasks, list):
-            return []
+            return [], []
         
     except subprocess.TimeoutExpired:
         raise RuntimeError("Search timed out. Please try again.")
@@ -264,7 +292,7 @@ def research_and_add_tasks(
         raise RuntimeError(f"Search failed: {e}")
     
     if not parsed_tasks:
-        return []
+        return [], []
     
     # Determine target file
     if project:
@@ -281,24 +309,63 @@ def research_and_add_tasks(
         else:
             task_file = load_task_file(target_path)
     
-    # Create tasks from parsed results
+    # Build index of existing tasks by match_key for quick lookup
+    existing_by_key: dict[str, Task] = {}
+    for task in task_file.tasks:
+        if task.match_key:
+            existing_by_key[task.match_key] = task
+    
+    # Create/update tasks from parsed results
     created_tasks = []
+    updated_tasks = []
+    
     for item in parsed_tasks:
         if not isinstance(item, dict) or "description" not in item:
             continue
+        
+        match_key = item.get("match_key")
+        
+        # Check if we should update an existing task
+        if match_key and match_key in existing_by_key:
+            existing_task = existing_by_key[match_key]
             
-        task = Task(
-            description=item["description"],
-            deadline=item.get("deadline"),
-            waiting_on=item.get("waiting_on"),
-            priority=item.get("priority", "medium"),
-            tags=item.get("tags", []),
-        )
-        task_file.tasks.append(task)
-        created_tasks.append(task)
+            # Update fields (newer info overwrites if present)
+            if item.get("deadline"):
+                # Parse deadline string to date object
+                try:
+                    existing_task.deadline = date.fromisoformat(item["deadline"])
+                except ValueError:
+                    pass  # Keep existing deadline if parsing fails
+            if item.get("deadline_time"):
+                existing_task.deadline_time = item["deadline_time"]
+            if item.get("priority"):
+                existing_task.priority = item["priority"]
+            if item.get("tags"):
+                # Merge tags
+                existing_tags = set(existing_task.tags)
+                existing_tags.update(item["tags"])
+                existing_task.tags = sorted(existing_tags)
+            if item.get("description"):
+                existing_task.description = item["description"]
+            
+            updated_tasks.append(existing_task)
+        else:
+            # Create new task
+            task = Task(
+                description=item["description"],
+                deadline=item.get("deadline"),
+                deadline_time=item.get("deadline_time"),
+                waiting_on=item.get("waiting_on"),
+                priority=item.get("priority", "medium"),
+                tags=item.get("tags", []),
+                match_key=match_key,
+            )
+            task_file.tasks.append(task)
+            created_tasks.append(task)
     
-    # Save all tasks
-    if created_tasks:
+    # Save if anything changed
+    if created_tasks or updated_tasks:
         save_task_file(task_file, target_path)
     
-    return created_tasks
+    return created_tasks, updated_tasks
+

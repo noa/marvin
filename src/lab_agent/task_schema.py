@@ -23,9 +23,11 @@ class Task(BaseModel):
     description: str
     status: Literal["open", "done"] = "open"
     deadline: date | None = None
+    deadline_time: str | None = None  # Specific time, e.g., "11:59 PM EST"
     waiting_on: str | None = None
     priority: Literal["high", "medium", "low"] = "medium"
     tags: list[str] = Field(default_factory=list)  # Semantic tags for filtering
+    match_key: str | None = None  # Stable key for deduplication (from research)
     created_at: date = Field(default_factory=date.today)
     completed_at: date | None = None
     

@@ -65,6 +65,19 @@ def list_tasks(
         ]
     
     today_date = date.today()
+    
+    # Collect all tasks for the conference box (before filtering)
+    all_tasks = []
+    for _, tf in task_files:
+        all_tasks.extend(tf.tasks)
+    
+    # Show conference deadlines box at the top (unless filtering by specific project/tag)
+    if not project and not tag and not waiting:
+        conference_box = styles.format_conference_box(all_tasks)
+        if conference_box:
+            styles.console.print()
+            styles.console.print(conference_box)
+    
     found_any = False
     
     for proj_name, tf in task_files:
@@ -82,6 +95,12 @@ def list_tasks(
                 continue
             if tag and tag.lower() not in [t.lower() for t in task.tags]:
                 continue
+            
+            # Skip conference tasks from inbox when showing the conference box
+            # (they're already displayed in the box)
+            if not project and not tag and not waiting:
+                if proj_name == "inbox" and "conference" in [t.lower() for t in task.tags]:
+                    continue
             
             matching_tasks.append(task)
         
@@ -374,3 +393,23 @@ def mark_done(data_dir: Path, task_id: str) -> "Task | None":
     
     return task
 
+
+def remove_task(data_dir: Path, task_id: str) -> "Task | None":
+    """Remove a task entirely by ID.
+    
+    Returns the removed task, or None if not found.
+    """
+    from lab_agent.task_schema import save_task_file
+    
+    result = find_task_by_id(data_dir, task_id)
+    if result is None:
+        return None
+    
+    file_path, task_file, task = result
+    
+    # Remove the task from the list
+    task_file.tasks = [t for t in task_file.tasks if t.id != task.id]
+    
+    save_task_file(task_file, file_path)
+    
+    return task

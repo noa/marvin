@@ -492,7 +492,10 @@ def add(task: str, project: str | None, no_llm: bool) -> None:
 @click.argument("query")
 @click.option("-p", "--project", help="Add tasks to specific project")
 def research(query: str, project: str | None) -> None:
-    """Search the web for deadlines and create tasks.
+    """Search the web for deadlines and create/update tasks.
+    
+    If a deadline with the same match_key already exists, it will be
+    updated with new information rather than duplicated.
     
     Examples:
     
@@ -509,18 +512,32 @@ def research(query: str, project: str | None) -> None:
     styles.console.print(f"[bold cyan]🔍 Searching:[/bold cyan] {query}...")
     
     try:
-        tasks = llm_parse.research_and_add_tasks(
+        created, updated = llm_parse.research_and_add_tasks(
             data_dir,
             query,
             project=project,
         )
         
-        if tasks:
-            styles.console.print(f"\n[green]Found {len(tasks)} deadline(s):[/green]")
-            for task in tasks:
-                styles.print_success(f"Added: {task.description}")
-                if task.deadline:
-                    styles.console.print(styles.format_deadline(task.deadline))
+        if created or updated:
+            if created:
+                styles.console.print(f"\n[green]Added {len(created)} new deadline(s):[/green]")
+                for task in created:
+                    styles.print_success(f"Added: {task.description}")
+                    if task.deadline:
+                        styles.console.print(styles.format_deadline(
+                            task.deadline, 
+                            deadline_time=task.deadline_time
+                        ))
+            
+            if updated:
+                styles.console.print(f"\n[yellow]Updated {len(updated)} existing deadline(s):[/yellow]")
+                for task in updated:
+                    styles.console.print(f"  [dim]•[/dim] {task.description}")
+                    if task.deadline:
+                        styles.console.print(styles.format_deadline(
+                            task.deadline,
+                            deadline_time=task.deadline_time
+                        ))
         else:
             styles.console.print("\n[dim]No deadlines found. Try a more specific query.[/dim]")
             return
@@ -725,6 +742,51 @@ def done(task_id: str) -> None:
     styles.print_success(f"Done: [{task.id[:4]}] {task.description}")
     
     git_sync_after(data_dir, f"done {task_id}")
+
+
+@main.command("rm")
+@click.argument("task_id")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+def rm(task_id: str, force: bool) -> None:
+    """Remove a task entirely by ID (fast path).
+    
+    Use the 4-character ID shown in 'la list' output.
+    This permanently removes the task (use 'done' to mark as completed instead).
+    
+    Example:
+    
+      la rm 72f9
+      la rm 72f9 --force
+    """
+    if not ensure_setup():
+        sys.exit(1)
+    
+    data_dir = get_data_dir()
+    git_sync_before(data_dir)
+    
+    # Find the task first to show what we're removing
+    result = fast_path.find_task_by_id(data_dir, task_id)
+    if result is None:
+        styles.print_error(f"Task '{task_id}' not found.")
+        sys.exit(1)
+    
+    _, _, task = result
+    
+    if not force:
+        click.confirm(
+            f"Remove '[{task.id[:4]}] {task.description}'?",
+            abort=True,
+        )
+    
+    removed = fast_path.remove_task(data_dir, task_id)
+    
+    if removed is None:
+        styles.print_error(f"Task '{task_id}' not found.")
+        sys.exit(1)
+    
+    styles.print_success(f"Removed: [{removed.id[:4]}] {removed.description}")
+    
+    git_sync_after(data_dir, f"rm {task_id}")
 
 
 @main.command("undo")
