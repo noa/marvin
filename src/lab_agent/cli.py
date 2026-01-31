@@ -269,16 +269,6 @@ def git_sync_after(data_dir: Path, message: str) -> bool:
         )
         
         if result.returncode != 0:  # There are changes
-            # Show diff summary
-            diff_result = subprocess.run(
-                ["git", "diff", "--cached", "--stat"],
-                cwd=data_dir,
-                capture_output=True,
-                text=True,
-            )
-            if diff_result.stdout.strip():
-                click.echo("\n" + diff_result.stdout.strip())
-            
             # Commit
             subprocess.run(
                 ["git", "commit", "-m", f"Agent: {message[:50]}"],
@@ -293,6 +283,7 @@ def git_sync_after(data_dir: Path, message: str) -> bool:
                 check=True,
                 capture_output=True,
             )
+            styles.console.print("\n[dim]☁️  Synced changes[/dim]")
             return True
         return False
     except subprocess.CalledProcessError as e:
@@ -458,10 +449,19 @@ def setup(force: bool) -> None:
 
 @main.command("add")
 @click.argument("task")
-@click.option("-p", "--project", help="Add to specific project")
+@click.option("-u", "--under", "--parent", "parent_id", help="Parent task ID (creates subtask)")
 @click.option("--no-llm", is_flag=True, help="Skip LLM, use regex parsing only (faster)")
-def add(task: str, project: str | None, no_llm: bool) -> None:
-    """Add a task to inbox or a specific project (hybrid: LLM parses, Python writes)."""
+def add(task: str, parent_id: str | None, no_llm: bool) -> None:
+    """Add a task (hybrid: LLM parses, Python writes).
+    
+    Examples:
+    
+      la add "remind me to check Sarah's draft"
+      
+      la add "run ablation study" --parent ae23
+      
+      la add "prepare slides" -u ae23
+    """
     if not ensure_setup():
         sys.exit(1)
     
@@ -473,10 +473,17 @@ def add(task: str, project: str | None, no_llm: bool) -> None:
         new_task = llm_parse.add_task(
             data_dir,
             task,
-            project=project,
             use_llm=not no_llm,
+            parent_id=parent_id,
         )
-        styles.print_success(f"Added: {new_task.description}")
+        
+        if parent_id:
+            styles.print_success(f"Added subtask: {new_task.description}")
+        else:
+            styles.print_success(f"Added: {new_task.description}")
+            
+        if new_task.tags:
+            styles.console.print(styles.format_tags(new_task.tags))
         if new_task.deadline:
             styles.console.print(styles.format_deadline(new_task.deadline))
         if new_task.waiting_on:
@@ -490,8 +497,7 @@ def add(task: str, project: str | None, no_llm: bool) -> None:
 
 @main.command("research")
 @click.argument("query")
-@click.option("-p", "--project", help="Add tasks to specific project")
-def research(query: str, project: str | None) -> None:
+def research(query: str) -> None:
     """Search the web for deadlines and create/update tasks.
     
     If a deadline with the same match_key already exists, it will be
@@ -501,7 +507,7 @@ def research(query: str, project: str | None) -> None:
     
       la research "ICML 2026 deadlines"
       
-      la research "NeurIPS 2026 submission dates" -p conferences
+      la research "NeurIPS 2026 submission dates"
     """
     if not ensure_setup():
         sys.exit(1)
@@ -515,7 +521,6 @@ def research(query: str, project: str | None) -> None:
         created, updated = llm_parse.research_and_add_tasks(
             data_dir,
             query,
-            project=project,
         )
         
         if created or updated:
@@ -552,19 +557,19 @@ def research(query: str, project: str | None) -> None:
 @main.command("list")
 @click.option("--today", is_flag=True, help="Only items due today")
 @click.option("--week", is_flag=True, help="Items due within 7 days")
-@click.option("-p", "--project", help="Filter by project")
 @click.option("-t", "--tag", help="Filter by tag (e.g., 'conference' or '#conference')")
 @click.option("--waiting", is_flag=True, help="Show @waiting items")
 @click.option("--overdue", is_flag=True, help="Show overdue items")
 @click.option("--all", "show_all", is_flag=True, help="Show all open tasks")
+@click.option("--raw", is_flag=True, help="Show all tasks with full tags (for debugging)")
 def list_tasks(
     today: bool,
     week: bool,
-    project: str | None,
     tag: str | None,
     waiting: bool,
     overdue: bool,
     show_all: bool,
+    raw: bool,
 ) -> None:
     """List tasks with various filters (fast path)."""
     if not ensure_setup():
@@ -578,16 +583,20 @@ def list_tasks(
         tag = tag[1:]
     
     # Use fast path - pure Python, no LLM
-    fast_path.list_tasks(
+    auto_cleared = fast_path.list_tasks(
         data_dir,
-        project=project,
         tag=tag,
         waiting=waiting,
         overdue=overdue,
         week=week,
         today=today,
         show_all=show_all,
+        raw=raw,
     )
+    
+    # Sync if any conference deadlines were auto-cleared
+    if auto_cleared:
+        git_sync_after(data_dir, "auto-clear past conference deadlines")
 
 
 @main.command("brief")
@@ -604,7 +613,11 @@ def brief(since: str, waiting: bool, deadlines: bool, fmt: str) -> None:
     git_sync_before(data_dir)
     
     # Use fast path - pure Python, no LLM
-    fast_path.show_brief(data_dir, waiting_focus=waiting)
+    auto_cleared = fast_path.show_brief(data_dir, waiting_focus=waiting)
+    
+    # Sync if any conference deadlines were auto-cleared
+    if auto_cleared:
+        git_sync_after(data_dir, "auto-clear past conference deadlines")
 
 
 @main.command("search")
@@ -627,24 +640,42 @@ def search(query: str, semantic: bool) -> None:
         fast_path.search_tasks(data_dir, query)
 
 
-@main.command("cleanup")
-def cleanup() -> None:
-    """Organize inbox by moving tasks to appropriate projects."""
+@main.command("subtasks")
+@click.argument("task_id")
+def subtasks(task_id: str) -> None:
+    """List subtasks of a task.
+    
+    Use the 4-character ID shown in 'la list' output.
+    
+    Example:
+    
+      la subtasks ae23
+    """
     if not ensure_setup():
         sys.exit(1)
     
     data_dir = get_data_dir()
     git_sync_before(data_dir)
     
-    prompt = "Review inbox.json and organize tasks by moving them to appropriate project tasks.json files based on their content"
-    
-    invoke_gemini(data_dir, prompt)
-    
-    # Validate JSON before committing
-    if not validate_after_llm(data_dir):
+    result = fast_path.find_task_by_id(data_dir, task_id)
+    if result is None:
+        styles.print_error(f"Task '{task_id}' not found.")
         sys.exit(1)
     
-    git_sync_after(data_dir, "organize inbox")
+    file_path, task_file, parent_task = result
+    children = task_file.get_children(parent_task.id)
+    
+    if not children:
+        styles.console.print(f"[dim]No subtasks for '{parent_task.description}'.[/dim]")
+        return
+    
+    styles.console.print()
+    styles.console.print(f"[bold]Subtasks of[/bold] [{parent_task.id[:4]}] {parent_task.description}:")
+    styles.console.print()
+    
+    # Print the parent and all its subtasks as a tree
+    fast_path.print_task_with_subtasks(task_file, parent_task)
+
 
 
 @main.command("edit")
@@ -787,6 +818,40 @@ def rm(task_id: str, force: bool) -> None:
     styles.print_success(f"Removed: [{removed.id[:4]}] {removed.description}")
     
     git_sync_after(data_dir, f"rm {task_id}")
+
+
+@main.command("clear-overdue")
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+def clear_overdue(force: bool) -> None:
+    """Mark all overdue tasks as done (fast path)."""
+    if not ensure_setup():
+        sys.exit(1)
+    
+    data_dir = get_data_dir()
+    git_sync_before(data_dir)
+    
+    # Check if there are any overdue tasks first
+    tf = fast_path.load_tasks(data_dir)
+    overdue_count = len([t for t in tf.open_tasks if t.is_overdue()])
+    
+    if overdue_count == 0:
+        styles.console.print("[green]✨ No overdue tasks found.[/green]")
+        return
+        
+    if not force:
+        click.confirm(
+            f"Mark all {overdue_count} overdue tasks as done?",
+            abort=True,
+        )
+    
+    cleared = fast_path.clear_overdue_tasks(data_dir)
+    
+    if cleared:
+        styles.print_success(f"Cleared {len(cleared)} overdue tasks.")
+        for task in cleared:
+            styles.console.print(f"  [dim]•[/dim] {task.description}")
+    
+    git_sync_after(data_dir, f"clear-overdue ({len(cleared)} tasks)")
 
 
 @main.command("undo")

@@ -253,15 +253,32 @@ def format_checkbox(done: bool) -> Text:
 def format_task_rich(
     task: "Task",
     *,
-    show_project: str | None = None,
     show_id: bool = True,
     indent: int = 2,
+    show_all_tags: bool = False,
+    is_subtask: bool = False,
+    subtask_depth: int = 1,
 ) -> Text:
-    """Format a task as a Rich Text object with full styling."""
+    """Format a task as a Rich Text object with full styling.
+    
+    Args:
+        task: The task to format
+        show_id: Whether to show the task ID
+        indent: Indentation level
+        show_all_tags: If True, always show tags (for debugging/raw mode)
+        is_subtask: If True, use subtask styling with tree prefix
+        subtask_depth: Nesting depth for subtasks (1 = direct child, 2 = grandchild, etc.)
+    """
     result = Text()
     
-    # Indentation
-    result.append(" " * indent)
+    # Indentation and subtask prefix
+    if is_subtask:
+        # Subtasks get extra indentation and a tree prefix
+        result.append(" " * indent)
+        result.append("  " * (subtask_depth - 1))  # Extra indent for deeper nesting
+        result.append("↳ ", style="dim")
+    else:
+        result.append(" " * indent)
     
     # Checkbox
     is_done = task.status == "done"
@@ -288,8 +305,9 @@ def format_task_rich(
     # Priority badge (only for non-medium)
     result.append_text(format_priority_badge(task.priority))
     
-    # Tags
-    result.append_text(format_tags(task.tags))
+    # Tags (always show in raw mode, otherwise only if present and non-conference)
+    if show_all_tags or task.tags:
+        result.append_text(format_tags(task.tags))
     
     return result
 
@@ -338,12 +356,13 @@ def format_conference_box(tasks: list["Task"]) -> Panel | None:
     """
     from datetime import date as date_cls
     
-    # Filter for open conference tasks with deadlines
+    # Filter for open conference deadline tasks (must have BOTH #conference AND #deadline tags)
     conference_tasks = [
         t for t in tasks 
         if t.status == "open" 
         and t.deadline is not None
         and "conference" in [tag.lower() for tag in t.tags]
+        and "deadline" in [tag.lower() for tag in t.tags]
     ]
     
     if not conference_tasks:

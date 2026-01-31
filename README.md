@@ -23,7 +23,7 @@ la setup
 This automatically:
 - Creates an orphan `data` branch for your tasks
 - Sets up a git worktree at `~/.lab-agent/data`
-- Copies template files (inbox, project structure, agent config)
+- Copies template files (tasks.json, agent config)
 - Pushes to remote if available
 
 > **Note:** Setup runs automatically on first use of any command, so you can skip this and just start using `la`.
@@ -32,12 +32,13 @@ This automatically:
 
 ```bash
 la "remind me to check Sarah's draft"   # Quick capture
-la add -p NSF-2026 "finalize budget"    # Add to project
+la add --parent ae23 "run ablation"     # Add subtask
 la list                                  # Today's tasks
 la list --week                           # This week
+la list -t conference                    # Filter by tag
+la subtasks ae23                         # View subtasks
 la brief                                 # Daily briefing
 la search "budget"                       # Search tasks
-la cleanup                               # Organize inbox
 ```
 
 ## Configuration

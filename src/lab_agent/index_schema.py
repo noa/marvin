@@ -16,7 +16,7 @@ def parse_task_file(file_path: Path) -> dict[str, Any]:
     """Parse a task JSON file and extract metadata.
     
     Returns:
-        dict with task_count, open_count, waiting_count, overdue_count, next_deadline, priority
+        dict with task_count, open_count, waiting_count, overdue_count, next_deadline
     """
     try:
         tf = load_task_file(file_path)
@@ -28,7 +28,6 @@ def parse_task_file(file_path: Path) -> dict[str, Any]:
             'waiting_count': 0,
             'overdue_count': 0,
             'next_deadline': None,
-            'priority': 'medium',
         }
     
     return {
@@ -37,54 +36,33 @@ def parse_task_file(file_path: Path) -> dict[str, Any]:
         'waiting_count': tf.waiting_count,
         'overdue_count': tf.overdue_count,
         'next_deadline': tf.next_deadline.isoformat() if tf.next_deadline else None,
-        'priority': 'medium',  # Could be read from a project config later
     }
 
 
 def rebuild_index(data_dir: Path) -> None:
-    """Rebuild .index.yaml from all task files.
+    """Rebuild .index.yaml from the task file.
     
     Args:
         data_dir: Path to the data directory (e.g., ~/.lab-agent/data)
     """
-    projects = []
+    tasks_path = data_dir / 'tasks.json'
     
-    # Scan projects directory
-    projects_dir = data_dir / 'projects'
-    if projects_dir.exists():
-        for tasks_file in projects_dir.rglob('tasks.json'):
-            rel_path = tasks_file.relative_to(data_dir)
-            project_name = str(rel_path.parent.relative_to('projects'))
-            
-            stats = parse_task_file(tasks_file)
-            projects.append({
-                'name': project_name,
-                'path': str(rel_path),
-                **stats,
-            })
-    
-    # Sort by priority (high > medium > low), then by next_deadline
-    priority_order = {'high': 0, 'medium': 1, 'low': 2}
-    projects.sort(key=lambda p: (
-        priority_order.get(p.get('priority', 'medium'), 1),
-        p.get('next_deadline') or '9999-99-99',
-    ))
-    
-    # Parse inbox
-    inbox_stats = {'task_count': 0, 'open_count': 0}
-    inbox_path = data_dir / 'inbox.json'
-    if inbox_path.exists():
-        stats = parse_task_file(inbox_path)
-        inbox_stats = {
-            'task_count': stats['task_count'],
-            'open_count': stats['open_count'],
+    # Parse tasks
+    if tasks_path.exists():
+        stats = parse_task_file(tasks_path)
+    else:
+        stats = {
+            'task_count': 0,
+            'open_count': 0,
+            'waiting_count': 0,
+            'overdue_count': 0,
+            'next_deadline': None,
         }
     
     # Build index
     index = {
         'generated_at': datetime.now().isoformat(),
-        'projects': projects,
-        'inbox': inbox_stats,
+        'tasks': stats,
     }
     
     # Write index file

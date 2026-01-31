@@ -31,6 +31,9 @@ class Task(BaseModel):
     created_at: date = Field(default_factory=date.today)
     completed_at: date | None = None
     
+    # Hierarchical relationships
+    parent_id: str | None = None  # ID of parent task (if this is a subtask)
+    
     def is_overdue(self) -> bool:
         """Check if task is overdue."""
         if self.status == "done" or self.deadline is None:
@@ -79,6 +82,44 @@ class TaskFile(BaseModel):
             if t.deadline and t.deadline >= date.today()
         ]
         return min(deadlines) if deadlines else None
+    
+    # Hierarchical task helpers
+    
+    def get_task_by_id(self, task_id: str) -> Task | None:
+        """Find a task by its ID."""
+        return next((t for t in self.tasks if t.id == task_id), None)
+    
+    def get_children(self, parent_id: str) -> list[Task]:
+        """Get all direct children of a task."""
+        return [t for t in self.tasks if t.parent_id == parent_id]
+    
+    def get_root_tasks(self) -> list[Task]:
+        """Get all tasks that are not subtasks (no parent)."""
+        return [t for t in self.tasks if t.parent_id is None]
+    
+    def get_open_root_tasks(self) -> list[Task]:
+        """Get all open tasks that are not subtasks."""
+        return [t for t in self.open_tasks if t.parent_id is None]
+    
+    def get_subtree(self, task_id: str) -> list[Task]:
+        """Get a task and all its descendants (recursive)."""
+        result = []
+        task = self.get_task_by_id(task_id)
+        if task:
+            result.append(task)
+            for child in self.get_children(task_id):
+                result.extend(self.get_subtree(child.id))
+        return result
+    
+    def has_open_subtasks(self, task_id: str) -> bool:
+        """Check if a task has any open subtasks."""
+        children = self.get_children(task_id)
+        for child in children:
+            if child.status == "open":
+                return True
+            if self.has_open_subtasks(child.id):
+                return True
+        return False
 
 
 def load_task_file(path: Path) -> TaskFile:
@@ -128,7 +169,7 @@ def validate_json_file(path: Path) -> tuple[bool, str | None]:
 
 
 def validate_all_task_files(data_dir: Path) -> list[tuple[Path, str]]:
-    """Validate all task JSON files in the data directory.
+    """Validate the task JSON file in the data directory.
     
     Args:
         data_dir: Path to the data directory
@@ -139,19 +180,10 @@ def validate_all_task_files(data_dir: Path) -> list[tuple[Path, str]]:
     """
     errors = []
     
-    # Check inbox
-    inbox_path = data_dir / "inbox.json"
-    if inbox_path.exists():
-        is_valid, error = validate_json_file(inbox_path)
+    tasks_path = data_dir / "tasks.json"
+    if tasks_path.exists():
+        is_valid, error = validate_json_file(tasks_path)
         if not is_valid:
-            errors.append((inbox_path, error))
-    
-    # Check project files
-    projects_dir = data_dir / "projects"
-    if projects_dir.exists():
-        for json_file in projects_dir.rglob("tasks.json"):
-            is_valid, error = validate_json_file(json_file)
-            if not is_valid:
-                errors.append((json_file, error))
+            errors.append((tasks_path, error))
     
     return errors

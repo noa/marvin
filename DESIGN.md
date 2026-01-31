@@ -5,14 +5,14 @@
 ## (a) Adding Tasks
 
 ```bash
-# Quick capture to inbox (natural language)
+# Quick capture (natural language)
 la add "remind me to check Sarah's draft on Friday"
 la add "review budget for NSF-2026 @deadline(2026-02-15)"
 la add "email Bob about equipment list @waiting(Bob)"
 
-# Add to a specific project
-la add --project NSF-2026 "finalize co-PI agreement"
-la add -p dissertation/alice "send chapter 3 feedback"
+# Add subtask under an existing task (use parent's 4-char ID)
+la add --parent ae23 "run ablation study"
+la add -u ae23 "prepare experiment data"
 
 # Shorthand: omit 'add' for quick capture
 la "call the grants office tomorrow"
@@ -28,56 +28,65 @@ la list --today          # explicit: only items due today
 # This week
 la list --week           # tasks due within 7 days
 
-# By project
-la list --project NSF-2026
-la list -p dissertation/alice
-
 # By tag or status
+la list --tag conference # filter by tag
+la list -t grant         # shorthand
 la list --waiting        # all @waiting(Name) items
-la list --blocked        # items you're blocked on
 la list --overdue        # past-due items
 
-# Full search (keyword or semantic)
-la search "budget"       # keyword search across all projects
-la search --semantic "funding deadlines"  # (if vector embeddings enabled)
+# Full search (keyword or tag)
+la search "budget"       # keyword search across all tasks
+la search "#conference"  # search by tag
 
 # Show everything
-la list --all            # all open tasks across all projects
+la list --all            # all open tasks
+la list --raw            # all tasks with full tags (for debugging)
 ```
 
-## (c) Daily Briefing
+## (c) Hierarchical Tasks
+
+```bash
+# View subtasks of a specific task
+la subtasks ae23         # Show subtasks of task ae23
+
+# Add subtask
+la add --parent ae23 "run ablation study"
+la add -u ae23 "prepare slides"
+```
+
+## (d) Maintenance
+
+```bash
+# Mark all past-due items as done
+la clear-overdue
+la clear-overdue --force  # Skip confirmation
+```
+
+## (e) Daily Briefing
 
 ```bash
 # Morning briefing (default: 24h lookback, today's deadlines)
 la brief                 # or: la briefing
 
-# Custom time window
-la brief --since yesterday
-la brief --since "3 days ago"
-
 # Focus on specific concerns
 la brief --waiting       # who are you waiting on?
 la brief --deadlines     # hard deadlines in next 7 days
-la brief --students      # student-related blockers
-
-# Output format options
-la brief --format markdown   # for pasting into notes
-la brief --format json       # for scripting
 ```
 
 ## Quick Reference Table
 
 | Action | Command |
 |--------|---------|
-| Add task to inbox | `la "task description"` |
-| Add to project | `la add -p PROJECT "task"` |
+| Add task | `la "task description"` |
+| Add subtask | `la add --parent ID "subtask"` |
+| View subtasks | `la subtasks ID` |
 | Today's tasks | `la list` |
 | This week | `la list --week` |
-| Project status | `la list -p PROJECT` |
+| Filter by tag | `la list -t TAG` |
 | Morning briefing | `la brief` |
 | Who am I waiting on? | `la brief --waiting` |
 | Search all tasks | `la search "keyword"` |
-| Organize inbox | `la cleanup` |
+| Clear past-due items | `la clear-overdue` |
 
 ---
 

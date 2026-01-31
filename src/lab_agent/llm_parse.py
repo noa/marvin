@@ -32,10 +32,12 @@ Tag rules:
 1. Extract explicit tags: #conference → "conference", #grant → "grant"
 2. Infer 1-3 semantic tags from context (e.g., "email Bob" → ["communication"])
 3. Common tag categories: conference, grant, paper, teaching, admin, student, meeting, review, deadline
+4. IMPORTANT: Use "deadline" tag ONLY for official external deadlines (conference submissions, grant due dates). Do NOT use "deadline" for personal tasks or prep work.
 
 Examples:
+- "ICML 2026 paper submission Feb 15" → {{"description": "ICML 2026 paper submission", "deadline": "2026-02-15", "waiting_on": null, "priority": "high", "tags": ["conference", "deadline"]}}
+- "finish experiments for ICML paper" → {{"description": "finish experiments for ICML paper", "deadline": null, "waiting_on": null, "priority": "medium", "tags": ["conference", "paper"]}}
 - "call Bob about grant @deadline(2026-02-15)" → {{"description": "call Bob about grant", "deadline": "2026-02-15", "waiting_on": null, "priority": "medium", "tags": ["communication", "grant"]}}
-- "submit ICML paper #conference" → {{"description": "submit ICML paper", "deadline": null, "waiting_on": null, "priority": "medium", "tags": ["conference", "paper"]}}
 - "grade homework for CS101" → {{"description": "grade homework for CS101", "deadline": null, "waiting_on": null, "priority": "medium", "tags": ["teaching", "grading"]}}
 
 Output JSON only:'''
@@ -137,35 +139,36 @@ def parse_task_locally(task_text: str) -> dict:
 def add_task(
     data_dir: Path,
     task_text: str,
-    project: str | None = None,
     use_llm: bool = True,
+    parent_id: str | None = None,
 ) -> Task:
-    """Add a task to inbox or project.
+    """Add a task to the task file.
     
     Args:
         data_dir: Path to data directory
         task_text: Natural language task description
-        project: Optional project name
         use_llm: Whether to use LLM for parsing (falls back to regex)
+        parent_id: ID of parent task (if creating a subtask)
         
     Returns:
         The created Task object
     """
-    # Determine target file
-    if project:
-        target_path = data_dir / "projects" / project / "tasks.json"
-        if not target_path.exists():
-            # Create new project
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            task_file = TaskFile(project=project, tasks=[])
-        else:
-            task_file = load_task_file(target_path)
-    else:
-        target_path = data_dir / "inbox.json"
-        if not target_path.exists():
-            task_file = TaskFile(project="inbox", tasks=[])
-        else:
-            task_file = load_task_file(target_path)
+    from lab_agent.fast_path import get_tasks_path, load_tasks
+    
+    tasks_path = get_tasks_path(data_dir)
+    
+    # If parent_id is provided, validate it exists
+    if parent_id:
+        from lab_agent.fast_path import find_task_by_id
+        result = find_task_by_id(data_dir, parent_id)
+        if result is None:
+            raise ValueError(f"Parent task not found: {parent_id}")
+        # Use the full ID from the finding
+        _, _, parent_task = result
+        parent_id = parent_task.id
+    
+    # Load or create task file
+    task_file = load_tasks(data_dir)
     
     # Parse the task
     parsed = None
@@ -183,11 +186,12 @@ def add_task(
         waiting_on=parsed.get("waiting_on"),
         priority=parsed.get("priority", "medium"),
         tags=parsed.get("tags", []),
+        parent_id=parent_id,  # Set parent reference if this is a subtask
     )
     
     # Add to task file and save
     task_file.tasks.append(task)
-    save_task_file(task_file, target_path)
+    save_task_file(task_file, tasks_path)
     
     return task
 
@@ -204,14 +208,14 @@ Output a JSON array of tasks. Each task should have:
 - deadline: date in YYYY-MM-DD format (or null if no specific date)
 - deadline_time: specific time in the user's timezone if available, e.g., "11:59 PM EST" or "23:59 UTC-5" (or null if not specified)
 - priority: "high" for imminent deadlines (within 2 weeks), "medium" otherwise
-- tags: 1-3 semantic tags (e.g., ["conference", "paper"])
+- tags: ALWAYS include ["conference", "deadline"] for official conference deadlines
 
 IMPORTANT: Look for specific deadline TIMES, not just dates. Conference deadlines often have specific times like "11:59 PM AoE" or "23:59 UTC".
 
 Output ONLY a valid JSON array, no other text. Example format:
 [
   {{"match_key": "icml-2026-abstract", "description": "ICML 2026 abstract submission", "deadline": "2026-01-30", "deadline_time": "11:59 PM AoE", "priority": "high", "tags": ["conference", "deadline"]}},
-  {{"match_key": "icml-2026-paper", "description": "ICML 2026 full paper deadline", "deadline": "2026-02-06", "deadline_time": "11:59 PM AoE", "priority": "high", "tags": ["conference", "paper"]}}
+  {{"match_key": "icml-2026-paper", "description": "ICML 2026 full paper deadline", "deadline": "2026-02-06", "deadline_time": "11:59 PM AoE", "priority": "high", "tags": ["conference", "deadline"]}}
 ]
 
 If no relevant deadlines found, output: []
@@ -242,7 +246,6 @@ def get_user_timezone() -> str:
 def research_and_add_tasks(
     data_dir: Path,
     query: str,
-    project: str | None = None,
 ) -> tuple[list[Task], list[Task]]:
     """Research a topic via web search and create/update tasks from findings.
     
@@ -252,11 +255,12 @@ def research_and_add_tasks(
     Args:
         data_dir: Path to data directory
         query: Search query (e.g., "ICML 2026 deadlines")
-        project: Optional project to add tasks to
         
     Returns:
         Tuple of (created_tasks, updated_tasks)
     """
+    from lab_agent.fast_path import get_tasks_path, load_tasks
+    
     today = date.today().isoformat()
     timezone = get_user_timezone()
     prompt = RESEARCH_PROMPT.format(query=query, today=today, timezone=timezone)
@@ -294,20 +298,9 @@ def research_and_add_tasks(
     if not parsed_tasks:
         return [], []
     
-    # Determine target file
-    if project:
-        target_path = data_dir / "projects" / project / "tasks.json"
-        if not target_path.exists():
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            task_file = TaskFile(project=project, tasks=[])
-        else:
-            task_file = load_task_file(target_path)
-    else:
-        target_path = data_dir / "inbox.json"
-        if not target_path.exists():
-            task_file = TaskFile(project="inbox", tasks=[])
-        else:
-            task_file = load_task_file(target_path)
+    # Load task file
+    tasks_path = get_tasks_path(data_dir)
+    task_file = load_tasks(data_dir)
     
     # Build index of existing tasks by match_key for quick lookup
     existing_by_key: dict[str, Task] = {}
@@ -365,7 +358,7 @@ def research_and_add_tasks(
     
     # Save if anything changed
     if created_tasks or updated_tasks:
-        save_task_file(task_file, target_path)
+        save_task_file(task_file, tasks_path)
     
     return created_tasks, updated_tasks
 

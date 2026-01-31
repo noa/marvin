@@ -4,56 +4,65 @@ This is a task management repository for an academic PI.
 
 ## File Structure
 
-- `inbox.md`: Quick captures, unsorted tasks
-- `projects/<name>/tasks.md`: Project-specific tasks
-- `archive/`: Completed projects
+- `tasks.json`: All tasks stored in a single JSON file
 
-## Task Format
+## Task Structure
 
-Tasks use GitHub-style checkboxes with optional metadata:
+Tasks are stored in JSON format with the following fields:
 
-```markdown
-- [ ] Task description @deadline(YYYY-MM-DD)
-- [ ] Task description @waiting(Name)
-- [x] Completed task
+```json
+{
+  "id": "unique-uuid",
+  "description": "Task description",
+  "status": "open",
+  "deadline": "2026-02-15",
+  "deadline_time": "11:59 PM AoE",
+  "waiting_on": "Person name",
+  "priority": "high",
+  "tags": ["conference", "deadline"],
+  "parent_id": null,
+  "created_at": "2026-01-15",
+  "completed_at": null
+}
 ```
 
-### Metadata Tags
+### Key Fields
 
-| Tag | Purpose | Example |
-|-----|---------|---------|
-| `@deadline(DATE)` | Hard deadline | `@deadline(2026-02-15)` |
-| `@waiting(NAME)` | Waiting on someone | `@waiting(Bob)` |
-| `@priority(high\|medium\|low)` | Priority level | `@priority(high)` |
+| Field | Purpose | Example |
+|-------|---------|---------|
+| `deadline` | Hard deadline date | `"2026-02-15"` |
+| `deadline_time` | Specific time (optional) | `"11:59 PM AoE"` |
+| `waiting_on` | Waiting on someone | `"Bob"` |
+| `priority` | Priority level | `"high"`, `"medium"`, `"low"` |
+| `tags` | Categorization tags | `["conference", "deadline"]` |
+| `parent_id` | Parent task ID for subtasks | `"abc123..."` |
+
+## Hierarchical Tasks
+
+Tasks can be organized hierarchically using `parent_id`:
+- Tasks with `parent_id: null` are root tasks
+- Tasks with a `parent_id` are subtasks of the referenced task
+- Subtasks can have their own subtasks for deep nesting
 
 ## Behavior Guidelines
 
-1. **Adding tasks**: If no project is specified, add to `inbox.md`
-2. **YAML frontmatter**: Preserve frontmatter when editing files
-3. **Briefings**: Prioritize deadlines and @waiting items
+1. **Adding tasks**: All tasks go to `tasks.json`
+2. **Subtasks**: Use `parent_id` to create hierarchical grouping
+3. **Briefings**: Prioritize deadlines and waiting-on items
 4. **Output style**: Keep responses concise; this is a CLI tool
-5. **Task completion**: Mark with `[x]` and optionally add completion date
-
-## File Frontmatter
-
-Each task file should have YAML frontmatter:
-
-```yaml
----
-project: Project Name
-status: active | completed | on-hold
-priority: high | medium | low
----
-```
+5. **Task completion**: Set `status` to `"done"` and `completed_at` to today's date
 
 ## Commands Context
 
 The user may issue these types of requests:
-- **add**: Create a new task
-- **list**: Show tasks with filters (today, week, project, waiting, overdue)
+- **add**: Create a new task (optionally with `--parent` for subtasks)
+- **list**: Show tasks with filters (today, week, tag, waiting, overdue)
+- **subtasks**: Show subtasks of a specific task
 - **brief**: Generate a summary of activity and upcoming items
-- **search**: Find tasks by keyword or semantically
-- **cleanup**: Organize inbox by moving tasks to appropriate projects
+- **search**: Find tasks by keyword or tag
+- **edit**: Modify task properties (tags, deadline, priority, etc.)
+- **done**: Mark a task as completed
+- **rm**: Remove a task entirely
 
 ## Restrictions
 
@@ -65,110 +74,23 @@ The user may issue these types of requests:
 
 If a user asks about git history or sync status, explain that the wrapper handles this automatically.
 
-## Recipes
+## Tag Conventions
 
-Each recipe is a deterministic procedure. Follow steps in order. Consult `.index.yaml` first for efficiency.
+### Conference Deadlines
 
-### list
+For official conference deadlines, use BOTH tags:
+- `conference` - indicates conference-related
+- `deadline` - indicates this is an external deadline
 
-```yaml
-recipe: list
-description: List tasks with optional filters
-steps:
-  - action: read_file
-    path: .index.yaml
-    purpose: Get project summary and counts
-  - action: filter_projects
-    by: flags (--waiting → waiting_count > 0, --overdue → overdue_count > 0, --project → name match)
-  - action: read_file
-    path: "{matched_project.path}"
-    for_each: matched_project
-  - action: extract_lines
-    pattern: "- [ ]"
-    filter_by: deadline/waiting tags if specified
-  - action: format_output
-    style: concise CLI list grouped by project
-```
+Tasks tagged with both `#conference` and `#deadline` that have a past deadline date are automatically cleared.
 
-### add
+### Common Tags
 
-```yaml
-recipe: add
-description: Add a new task
-steps:
-  - action: determine_target
-    if_project_specified: "projects/{project}/tasks.md"
-    else: "inbox.md"
-  - action: read_file
-    path: "{target}"
-  - action: parse_task
-    extract: deadline, waiting, priority from natural language
-    format: "- [ ] {description} {metadata_tags}"
-  - action: append_task
-    location: after last existing task (before any blank lines at end)
-    preserve: YAML frontmatter
-  - action: write_file
-    path: "{target}"
-```
-
-### brief
-
-```yaml
-recipe: brief
-description: Generate a daily briefing
-steps:
-  - action: read_file
-    path: .index.yaml
-  - action: identify_urgent
-    criteria:
-      - overdue_count > 0
-      - next_deadline within 7 days
-      - waiting_count > 0 (if --waiting flag)
-  - action: read_file
-    path: "{urgent_project.path}"
-    for_each: urgent_project
-  - action: synthesize
-    include:
-      - overdue items (CRITICAL)
-      - items due this week
-      - waiting-on summary
-    format: concise bullet points
-```
-
-### cleanup
-
-```yaml
-recipe: cleanup
-description: Organize inbox by moving tasks to projects
-steps:
-  - action: read_file
-    path: inbox.md
-  - action: read_file
-    path: .index.yaml
-  - action: for_each_task
-    in: inbox.md
-    steps:
-      - classify: match task to existing project by keywords/context
-      - if_match_found:
-          - read_file: "projects/{matched}/tasks.md"
-          - append_task: add to matched project file
-          - remove_task: from inbox.md
-      - if_no_match: leave in inbox
-  - action: write_files
-    modified: [inbox.md, ...matched project files]
-```
-
-### search
-
-```yaml
-recipe: search
-description: Search across all tasks
-steps:
-  - action: read_file
-    path: .index.yaml
-  - action: grep_search
-    pattern: "{query}"
-    paths: [inbox.md, projects/**/tasks.md]
-  - action: format_output
-    style: list with file context
-```
+- `conference` - Conference-related work
+- `deadline` - External deadline (use with `conference` for conference deadlines)
+- `grant` - Grant-related work
+- `paper` - Paper writing/research
+- `teaching` - Teaching duties
+- `admin` - Administrative tasks
+- `student` - Student-related tasks
+- `meeting` - Meeting-related tasks
