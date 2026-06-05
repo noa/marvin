@@ -7,10 +7,13 @@ then Python handles the file writing.
 import json
 import re
 import subprocess
+import urllib.request
+import urllib.error
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 
-from lab_agent.task_schema import Task, TaskFile, load_task_file, save_task_file
+from marvin.task_schema import Task, TaskFile, load_task_file, save_task_file
 
 
 # Prompt template for parsing natural language to task JSON
@@ -153,13 +156,13 @@ def add_task(
     Returns:
         The created Task object
     """
-    from lab_agent.fast_path import get_tasks_path, load_tasks
+    from marvin.fast_path import get_tasks_path, load_tasks
     
     tasks_path = get_tasks_path(data_dir)
     
     # If parent_id is provided, validate it exists
     if parent_id:
-        from lab_agent.fast_path import find_task_by_id
+        from marvin.fast_path import find_task_by_id
         result = find_task_by_id(data_dir, parent_id)
         if result is None:
             raise ValueError(f"Parent task not found: {parent_id}")
@@ -223,6 +226,102 @@ If no relevant deadlines found, output: []
 JSON array:'''
 
 
+# Prompt template for URL content extraction
+URL_RESEARCH_PROMPT = '''Extract deadlines and action items from the following page content.
+
+Source URL: {url}
+Today's date is {today}. The user's timezone is {timezone}.
+
+Page content:
+{content}
+
+Based on the above content, extract any relevant deadlines, dates, or action items.
+Output a JSON array of tasks. Each task should have:
+- match_key: a stable identifier to match this deadline if we search again (e.g., "icml-2026-abstract", "neurips-2026-paper")
+- description: what needs to be done
+- deadline: date in YYYY-MM-DD format (or null if no specific date)
+- deadline_time: specific time in the user's timezone if available, e.g., "11:59 PM EST" or "23:59 UTC-5" (or null if not specified)
+- priority: "high" for imminent deadlines (within 2 weeks), "medium" otherwise
+- tags: relevant tags (always include ["conference", "deadline"] for official conference deadlines)
+
+IMPORTANT: Look for specific deadline TIMES, not just dates. Conference deadlines often have specific times like "11:59 PM AoE" or "23:59 UTC".
+
+Output ONLY a valid JSON array, no other text. If no relevant deadlines found, output: []
+
+JSON array:'''
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Simple HTML-to-text converter."""
+
+    _SKIP_TAGS = frozenset(["script", "style", "noscript", "head"])
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pieces: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self._pieces.append(data)
+
+    def get_text(self) -> str:
+        return " ".join(self._pieces)
+
+
+def _html_to_text(html: str) -> str:
+    """Strip HTML tags and return plain text."""
+    extractor = _HTMLTextExtractor()
+    extractor.feed(html)
+    return extractor.get_text()
+
+
+def fetch_url_content(url: str, max_chars: int = 12000) -> str:
+    """Fetch a URL and return its text content.
+
+    Args:
+        url: The URL to fetch.
+        max_chars: Maximum characters to return (to stay within prompt limits).
+
+    Returns:
+        Plain text extracted from the page.
+
+    Raises:
+        RuntimeError: If the fetch fails.
+    """
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "marvin/0.1 (deadline-lookup)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not fetch URL: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"URL fetch failed: {e}") from e
+
+    text = _html_to_text(raw)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n[...truncated]"
+    return text
+
+
+def is_url(text: str) -> bool:
+    """Check if text looks like a URL."""
+    return text.startswith("http://") or text.startswith("https://")
+
+
 def get_user_timezone() -> str:
     """Get the user's current timezone as a string like 'EST' or 'UTC-5'."""
     import time
@@ -246,8 +345,9 @@ def get_user_timezone() -> str:
 def research_and_add_tasks(
     data_dir: Path,
     query: str,
+    url: str | None = None,
 ) -> tuple[list[Task], list[Task]]:
-    """Research a topic via web search and create/update tasks from findings.
+    """Research a topic via web search (or URL) and create/update tasks.
     
     Uses match_key for deduplication - if a task with the same match_key
     already exists, it will be updated rather than duplicated.
@@ -255,15 +355,23 @@ def research_and_add_tasks(
     Args:
         data_dir: Path to data directory
         query: Search query (e.g., "ICML 2026 deadlines")
+        url: Optional URL to fetch content from instead of web search
         
     Returns:
         Tuple of (created_tasks, updated_tasks)
     """
-    from lab_agent.fast_path import get_tasks_path, load_tasks
+    from marvin.fast_path import get_tasks_path, load_tasks
     
     today = date.today().isoformat()
     timezone = get_user_timezone()
-    prompt = RESEARCH_PROMPT.format(query=query, today=today, timezone=timezone)
+    
+    if url:
+        content = fetch_url_content(url)
+        prompt = URL_RESEARCH_PROMPT.format(
+            url=url, content=content, today=today, timezone=timezone,
+        )
+    else:
+        prompt = RESEARCH_PROMPT.format(query=query, today=today, timezone=timezone)
     
     try:
         # Run Gemini with a longer timeout for web search

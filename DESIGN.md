@@ -369,7 +369,7 @@ Since the entire architecture is based on **Git + Markdown**, mobile access is e
       "mcpServers": {
         "lab-agent": {
           "command": "python",
-          "args": ["/path/to/lab_agent/mcp_server.py"]
+          "args": ["/path/to/marvin/mcp_server.py"]
         }
       }
     }

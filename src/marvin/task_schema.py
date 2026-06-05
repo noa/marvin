@@ -1,4 +1,4 @@
-"""Task schema for lab-agent using Pydantic.
+"""Task schema for Marvin using Pydantic.
 
 Defines the JSON structure for task files and provides validation.
 """
@@ -27,6 +27,7 @@ class Task(BaseModel):
     waiting_on: str | None = None
     priority: Literal["high", "medium", "low"] = "medium"
     tags: list[str] = Field(default_factory=list)  # Semantic tags for filtering
+    notes: list[str] = Field(default_factory=list)  # Free-text annotations
     match_key: str | None = None  # Stable key for deduplication (from research)
     created_at: date = Field(default_factory=date.today)
     completed_at: date | None = None
