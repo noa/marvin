@@ -1,8 +1,7 @@
 # Marvin — Agent Skill File
 
 Marvin is a CLI tool for task management, designed for academic PIs. It tracks
-tasks, deadlines, collaborators, and waiting-on blockers — all backed by Git
-for automatic sync and full history.
+tasks, deadlines, collaborators, and waiting-on blockers.
 
 ## Quick Tour: CLI vs. Agentic Usecases
 
@@ -62,12 +61,12 @@ Use Marvin when the user asks about:
 
 ## Data directory
 
-Marvin reads from a data directory at `~/.marvin/data` (a Git worktree).
-Override with the `LA_DATA_DIR` environment variable.
+Marvin reads from a data directory at `~/.marvin`.
+Override with the `MARVIN_DATA_DIR` environment variable.
 
 The data directory contains:
 ```
-~/.marvin/data/
+~/.marvin/
 ├── GEMINI.md            # Agent guidance for task management
 ├── .gemini/
 │   └── settings.json    # Tool restrictions (no shell access)
@@ -106,8 +105,6 @@ marvin person list                 # List all collaborators
 marvin person show alice           # Show person profile + related tasks
 marvin who alice                   # Quick person lookup
 
-# History
-marvin history                     # Recent operations
 
 # Ideas
 marvin ideas                       # List active ideas
@@ -139,9 +136,6 @@ marvin done ae23
 marvin rm 72f9
 marvin clear-overdue
 
-# Undo and reset
-marvin undo
-marvin reset
 
 # People management
 marvin person add "Alice Chen" --role "PhD student" --affiliation "MIT"
@@ -189,7 +183,6 @@ marvin ideas link ae23 --person bob  # Link to person
 | Develop idea            | `marvin ideas develop ID`                  |
 | Promote idea to task    | `marvin ideas promote ID`                  |
 | Tend idea garden        | `marvin ideas tend`                        |
-| Undo last change        | `marvin undo`                              |
 | Clear past-due items    | `marvin clear-overdue`                     |
 
 ## Important conventions
@@ -207,8 +200,6 @@ marvin ideas link ae23 --person bob  # Link to person
   garden triage — review, add a note, develop, or let them archive
 - **Ideas can be promoted** to tasks via `marvin ideas promote`, which creates
   a new task from the idea and marks the idea as promoted
-- **Git sync** is automatic — every command pulls before and commits/pushes
-  after. Never run git commands manually against the data directory
 - **`marvin` vs `la`** — the CLI is installed as `marvin` but also aliased
   as `la` (lab-agent). Both work identically
 

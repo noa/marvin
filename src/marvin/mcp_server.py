@@ -17,67 +17,16 @@ from pathlib import Path
 
 def _get_data_dir() -> str:
     """Resolve data directory from env or default."""
-    return os.environ.get("LA_DATA_DIR", str(Path.home() / ".marvin" / "data"))
+    return os.environ.get("MARVIN_DATA_DIR") or os.environ.get("LA_DATA_DIR") or str(Path.home() / ".marvin")
 
 
-def _git_sync_before(data_dir: Path) -> bool:
-    """Pull latest changes from remote. Returns True if successful."""
-    import subprocess
-
-    try:
-        subprocess.run(
-            ["git", "pull", "--rebase", "--quiet"],
-            cwd=data_dir,
-            check=True,
-            capture_output=True,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def _git_sync_after(data_dir: Path, message: str) -> bool:
-    """Commit and push any changes. Returns True if changes were pushed."""
-    import subprocess
-
+def _rebuild_index(data_dir: Path) -> None:
+    """Rebuild the search index after changes."""
     from marvin.index_schema import rebuild_index
-
     try:
-        # Rebuild index before staging
-        try:
-            rebuild_index(data_dir)
-        except Exception:
-            pass
-
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=data_dir,
-            check=True,
-            capture_output=True,
-        )
-
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-
-        if result.returncode != 0:
-            subprocess.run(
-                ["git", "commit", "-m", f"Agent: {message[:50]}"],
-                cwd=data_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "push", "--quiet"],
-                cwd=data_dir,
-                capture_output=True,
-            )
-            return True
-        return False
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+        rebuild_index(data_dir)
+    except Exception:
+        pass
 
 
 def _task_to_dict(task) -> dict:
@@ -166,7 +115,7 @@ def main():
     mcp = FastMCP(
         "marvin",
         instructions=(
-            "Git-backed task management for academic PIs. "
+            "Task management for academic PIs. "
             "Manages tasks, deadlines, collaborators, and waiting-on items."
         ),
     )
@@ -208,7 +157,6 @@ def main():
         """
         from datetime import date as _date
 
-        _git_sync_before(data_dir)
 
         tf = fast_path.load_tasks(data_dir)
         today_date = _date.today()
@@ -263,7 +211,6 @@ def main():
         """
         from datetime import date as _date
 
-        _git_sync_before(data_dir)
 
         tf = fast_path.load_tasks(data_dir)
         today_date = _date.today()
@@ -319,7 +266,6 @@ def main():
         Args:
             query: Search term. Prefix with '#' to search tags only.
         """
-        _git_sync_before(data_dir)
 
         tf = fast_path.load_tasks(data_dir)
         query_lower = query.lower()
@@ -351,7 +297,6 @@ def main():
         Args:
             task_id: Task ID or 4-character prefix (e.g., 'ae23').
         """
-        _git_sync_before(data_dir)
 
         result = fast_path.find_task_by_id(data_dir, task_id)
         if result is None:
@@ -375,7 +320,6 @@ def main():
         Returns all registered collaborators with their roles,
         affiliations, aliases, and tags.
         """
-        _git_sync_before(data_dir)
 
         cf = fast_path.load_collaborators(data_dir)
         people = [_collab_to_dict(c) for c in cf.collaborators]
@@ -391,7 +335,6 @@ def main():
         Args:
             person: Name, alias, or 4-char ID prefix.
         """
-        _git_sync_before(data_dir)
 
         cf = fast_path.load_collaborators(data_dir)
         collab, suggestions = resolve_person(person, cf)
@@ -435,7 +378,6 @@ def main():
             parent_id: Parent task ID to create a subtask (optional).
             no_llm: Skip LLM parsing, use regex-only (faster but less accurate).
         """
-        _git_sync_before(data_dir)
 
         try:
             new_task = llm_parse.add_task(
@@ -444,7 +386,7 @@ def main():
                 use_llm=not no_llm,
                 parent_id=parent_id,
             )
-            _git_sync_after(data_dir, task[:50])
+            _rebuild_index(data_dir)
             return json.dumps(
                 {"success": True, "task": _task_to_dict(new_task)},
                 indent=2,
@@ -477,7 +419,6 @@ def main():
             waiting: Set waiting-on person name.
             clear_waiting: Clear the waiting-on field.
         """
-        _git_sync_before(data_dir)
 
         task = fast_path.edit_task(
             data_dir,
@@ -495,7 +436,7 @@ def main():
         if task is None:
             return json.dumps({"error": f"Task '{task_id}' not found"})
 
-        _git_sync_after(data_dir, f"edit {task_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "task": _task_to_dict(task)},
             indent=2,
@@ -511,13 +452,12 @@ def main():
             task_id: Task ID or 4-character prefix.
             text: Note text to add.
         """
-        _git_sync_before(data_dir)
 
         task = fast_path.add_note(data_dir, task_id, text)
         if task is None:
             return json.dumps({"error": f"Task '{task_id}' not found"})
 
-        _git_sync_after(data_dir, f"note {task_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "task": _task_to_dict(task)},
             indent=2,
@@ -530,13 +470,12 @@ def main():
         Args:
             task_id: Task ID or 4-character prefix.
         """
-        _git_sync_before(data_dir)
 
         task = fast_path.mark_done(data_dir, task_id)
         if task is None:
             return json.dumps({"error": f"Task '{task_id}' not found"})
 
-        _git_sync_after(data_dir, f"done {task_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "task": _task_to_dict(task)},
             indent=2,
@@ -552,13 +491,12 @@ def main():
         Args:
             task_id: Task ID or 4-character prefix.
         """
-        _git_sync_before(data_dir)
 
         task = fast_path.remove_task(data_dir, task_id)
         if task is None:
             return json.dumps({"error": f"Task '{task_id}' not found"})
 
-        _git_sync_after(data_dir, f"rm {task_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "removed": _task_to_dict(task)},
             indent=2,
@@ -570,11 +508,10 @@ def main():
 
         Returns the list of tasks that were cleared.
         """
-        _git_sync_before(data_dir)
 
         cleared = fast_path.clear_overdue_tasks(data_dir)
         if cleared:
-            _git_sync_after(data_dir, f"clear-overdue ({len(cleared)} tasks)")
+            _rebuild_index(data_dir)
 
         return json.dumps(
             {
@@ -606,7 +543,6 @@ def main():
             aliases: Additional aliases for quick lookup.
             tags: Searchable labels (e.g., ["student", "nlp"]).
         """
-        _git_sync_before(data_dir)
 
         try:
             collab = fast_path.add_collaborator(
@@ -618,7 +554,7 @@ def main():
                 extra_aliases=aliases or [],
                 tags=[t.lstrip("#").lower() for t in (tags or [])],
             )
-            _git_sync_after(data_dir, f"person add {name}")
+            _rebuild_index(data_dir)
             return json.dumps(
                 {"success": True, "collaborator": _collab_to_dict(collab)},
                 indent=2,
@@ -634,13 +570,12 @@ def main():
             person: Name, alias, or 4-char ID prefix.
             text: Note text to add.
         """
-        _git_sync_before(data_dir)
 
         collab = fast_path.add_collaborator_note(data_dir, person, text)
         if collab is None:
             return json.dumps({"error": f"Collaborator '{person}' not found"})
 
-        _git_sync_after(data_dir, f"person note {collab.name[:20]}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "collaborator": _collab_to_dict(collab)},
             indent=2,
@@ -656,13 +591,12 @@ def main():
         Args:
             person: Name, alias, or 4-char ID prefix.
         """
-        _git_sync_before(data_dir)
 
         collab = fast_path.remove_collaborator(data_dir, person)
         if collab is None:
             return json.dumps({"error": f"Collaborator '{person}' not found"})
 
-        _git_sync_after(data_dir, f"person rm {collab.name[:20]}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "removed": _collab_to_dict(collab)},
             indent=2,
@@ -689,7 +623,6 @@ def main():
             tag: Filter by tag (e.g., 'ml', 'nlp').
             person: Filter by associated person name.
         """
-        _git_sync_before(data_dir)
 
         idea_file = fast_path.load_ideas(data_dir)
 
@@ -729,7 +662,6 @@ def main():
         Args:
             idea_id: Idea ID or 4-character prefix (e.g., 'ae23').
         """
-        _git_sync_before(data_dir)
 
         result = fast_path.find_idea_by_id(data_dir, idea_id)
         if result is None:
@@ -751,7 +683,6 @@ def main():
         Args:
             query: Search term. Prefix with '#' to search tags only.
         """
-        _git_sync_before(data_dir)
 
         idea_file = fast_path.load_ideas(data_dir)
         query_lower = query.lower()
@@ -809,7 +740,6 @@ def main():
             people: Associated people (e.g., ['Alice Chen', 'Bob']).
             links: Related URLs or references.
         """
-        _git_sync_before(data_dir)
 
         try:
             idea = fast_path.add_idea(
@@ -829,7 +759,7 @@ def main():
                 if result:
                     _, _, idea = result
 
-            _git_sync_after(data_dir, f"idea add: {thought[:50]}")
+            _rebuild_index(data_dir)
             return json.dumps(
                 {"success": True, "idea": _idea_to_dict(idea)},
                 indent=2,
@@ -848,13 +778,12 @@ def main():
             idea_id: Idea ID or 4-character prefix.
             text: Note text to add.
         """
-        _git_sync_before(data_dir)
 
         idea = fast_path.add_idea_note(data_dir, idea_id, text)
         if idea is None:
             return json.dumps({"error": f"Idea '{idea_id}' not found"})
 
-        _git_sync_after(data_dir, f"idea note {idea_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "idea": _idea_to_dict(idea)},
             indent=2,
@@ -871,7 +800,6 @@ def main():
             idea_id: Idea ID or 4-character prefix.
             note: Development note explaining why this idea has legs.
         """
-        _git_sync_before(data_dir)
 
         idea = fast_path.develop_idea(data_dir, idea_id, note)
         if idea is None:
@@ -879,7 +807,7 @@ def main():
                 {"error": f"Idea '{idea_id}' not found or not in 'spark' status"}
             )
 
-        _git_sync_after(data_dir, f"idea develop {idea_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "idea": _idea_to_dict(idea)},
             indent=2,
@@ -896,7 +824,6 @@ def main():
             idea_id: Idea ID or 4-character prefix.
             note: Maturity note explaining why this idea is ready.
         """
-        _git_sync_before(data_dir)
 
         idea = fast_path.mature_idea(data_dir, idea_id, note)
         if idea is None:
@@ -904,7 +831,7 @@ def main():
                 {"error": f"Idea '{idea_id}' not found or not in 'developing' status"}
             )
 
-        _git_sync_after(data_dir, f"idea mature {idea_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "idea": _idea_to_dict(idea)},
             indent=2,
@@ -929,7 +856,6 @@ def main():
         """
         from datetime import date as _date
 
-        _git_sync_before(data_dir)
 
         parsed_deadline = None
         if deadline:
@@ -952,7 +878,7 @@ def main():
             )
 
         idea, task = result
-        _git_sync_after(data_dir, f"idea promote {idea_id} -> {task.id[:4]}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {
                 "success": True,
@@ -972,13 +898,12 @@ def main():
         Args:
             idea_id: Idea ID or 4-character prefix.
         """
-        _git_sync_before(data_dir)
 
         idea = fast_path.archive_idea(data_dir, idea_id)
         if idea is None:
             return json.dumps({"error": f"Idea '{idea_id}' not found"})
 
-        _git_sync_after(data_dir, f"idea archive {idea_id}")
+        _rebuild_index(data_dir)
         return json.dumps(
             {"success": True, "idea": _idea_to_dict(idea)},
             indent=2,

@@ -18,16 +18,15 @@ from marvin.cli import main
 
 @pytest.fixture
 def cli_env(tmp_path, monkeypatch):
-    """Set up a minimal data dir with seed files and patch away git/setup."""
+    """Set up a minimal data dir with seed files and patch away setup."""
     (tmp_path / "tasks.json").write_text('{"project": "default", "tasks": []}')
     (tmp_path / "collaborators.json").write_text('{"collaborators": []}')
 
     monkeypatch.setattr("marvin.cli.get_data_dir", lambda: tmp_path)
     monkeypatch.setattr("marvin.cli.is_setup_complete", lambda: True)
-    monkeypatch.setattr("marvin.cli.git_sync_before", lambda d: True)
-    monkeypatch.setattr("marvin.cli.git_sync_after", lambda d, m: False)
 
     return tmp_path
+
 
 
 @pytest.fixture

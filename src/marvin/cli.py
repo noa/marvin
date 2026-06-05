@@ -1,4 +1,4 @@
-"""Marvin CLI - A thin wrapper around Gemini CLI with Git sync."""
+"""Marvin CLI - Task management for academic PIs."""
 
 import subprocess
 import sys
@@ -15,8 +15,8 @@ from marvin import fast_path
 from marvin import llm_parse
 from marvin import styles
 
-# Default data directory: worktree checked out to ~/.marvin/data
-DEFAULT_DATA_DIR = Path.home() / ".marvin" / "data"
+# Default data directory
+DEFAULT_DATA_DIR = Path.home() / ".marvin"
 
 # Template directory (relative to installed package)
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "data-template"
@@ -24,22 +24,20 @@ TEMPLATE_DIR = Path(__file__).parent.parent.parent / "data-template"
 
 def get_data_dir() -> Path:
     """Get the data directory path."""
-    # Check environment variable first, then fall back to default
     import os
-    data_dir = os.environ.get("LA_DATA_DIR")
+    data_dir = os.environ.get("MARVIN_DATA_DIR") or os.environ.get("LA_DATA_DIR")
     if data_dir:
         return Path(data_dir)
     return DEFAULT_DATA_DIR
 
 
 def is_setup_complete() -> bool:
-    """Check if the data directory is set up and is a valid git worktree."""
+    """Check if the data directory is set up."""
     data_dir = get_data_dir()
     if not data_dir.exists():
         return False
-    # Check if it's a valid git directory
-    git_dir = data_dir / ".git"
-    if not git_dir.exists():
+    # Check for tasks.json as a marker that setup was completed
+    if not (data_dir / "tasks.json").exists():
         return False
     return True
 
@@ -68,8 +66,7 @@ def run_setup(skip_prompts: bool = False) -> bool:
     
     if not main_repo:
         click.echo("Error: Could not find the main marvin repository.", err=True)
-        click.echo("Please run this command from the marvin repo directory,", err=True)
-        click.echo("or set LA_REPO_DIR to point to it.", err=True)
+        click.echo("Please run this command from the marvin repo directory.", err=True)
         return False
     
     template_dir = main_repo / "data-template"
@@ -78,145 +75,31 @@ def run_setup(skip_prompts: bool = False) -> bool:
         return False
     
     click.echo(f"Setting up marvin data directory at {data_dir}...")
-    click.echo(f"Using main repo at {main_repo}")
     
     try:
-        # Step 1: Check if data branch exists
-        result = subprocess.run(
-            ["git", "branch", "--list", "data"],
-            cwd=main_repo,
-            capture_output=True,
-            text=True,
-        )
-        data_branch_exists = bool(result.stdout.strip())
+        # Create the data directory
+        data_dir.mkdir(parents=True, exist_ok=True)
         
-        # Also check remote
-        if not data_branch_exists:
-            result = subprocess.run(
-                ["git", "ls-remote", "--heads", "origin", "data"],
-                cwd=main_repo,
-                capture_output=True,
-                text=True,
-            )
-            if result.stdout.strip():
-                # Fetch the remote branch
-                click.echo("Fetching data branch from remote...")
-                subprocess.run(
-                    ["git", "fetch", "origin", "data:data"],
-                    cwd=main_repo,
-                    check=True,
-                    capture_output=True,
-                )
-                data_branch_exists = True
-        
-        # Step 2: Create orphan data branch if needed
-        if not data_branch_exists:
-            click.echo("Creating data branch...")
-            current_branch = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=main_repo,
-                capture_output=True,
-                text=True,
-            ).stdout.strip() or "main"
-            
-            subprocess.run(
-                ["git", "checkout", "--orphan", "data"],
-                cwd=main_repo,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "rm", "-rf", "."],
-                cwd=main_repo,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "commit", "--allow-empty", "-m", "Initialize data branch"],
-                cwd=main_repo,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "checkout", current_branch],
-                cwd=main_repo,
-                check=True,
-                capture_output=True,
-            )
-        
-        # Step 3: Create worktree directory
-        data_dir.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Remove existing worktree if present but broken
-        if data_dir.exists():
-            click.echo("Removing existing data directory...")
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(data_dir)],
-                cwd=main_repo,
-                capture_output=True,
-            )
-            if data_dir.exists():
-                shutil.rmtree(data_dir)
-        
-        # Step 4: Add worktree
-        click.echo("Creating worktree...")
-        subprocess.run(
-            ["git", "worktree", "add", str(data_dir), "data"],
-            cwd=main_repo,
-            check=True,
-            capture_output=True,
-        )
-        
-        # Step 5: Copy template files if the data dir is empty (new branch)
-        existing_files = list(data_dir.glob("*"))
-        # Filter out .git
-        existing_files = [f for f in existing_files if f.name != ".git"]
+        # Copy template files if the data dir is empty (new setup)
+        existing_files = [f for f in data_dir.iterdir() if not f.name.startswith('.')]
         
         if not existing_files:
             click.echo("Copying template files...")
             for item in template_dir.iterdir():
                 dest = data_dir / item.name
+                if dest.exists():
+                    continue
                 if item.is_dir():
                     shutil.copytree(item, dest)
                 else:
                     shutil.copy2(item, dest)
-            
-            # Commit the initial files
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=data_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "commit", "-m", "Initial data files"],
-                cwd=data_dir,
-                check=True,
-                capture_output=True,
-            )
-        
-        # Step 6: Push to remote (if remote exists)
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            click.echo("Pushing to remote...")
-            subprocess.run(
-                ["git", "push", "-u", "origin", "data"],
-                cwd=data_dir,
-                capture_output=True,
-            )
         
         click.echo("✓ Setup complete!")
         click.echo(f"  Data directory: {data_dir}")
         return True
         
-    except subprocess.CalledProcessError as e:
+    except OSError as e:
         click.echo(f"Error during setup: {e}", err=True)
-        if e.stderr:
-            click.echo(e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr, err=True)
         return False
 
 
@@ -228,67 +111,6 @@ def ensure_setup() -> bool:
     click.echo("Marvin data directory not found. Running first-time setup...\n")
     return run_setup()
 
-
-def git_sync_before(data_dir: Path) -> bool:
-    """Pull latest changes from remote. Returns True if successful."""
-    try:
-        subprocess.run(
-            ["git", "pull", "--rebase", "--quiet"],
-            cwd=data_dir,
-            check=True,
-            capture_output=True,
-        )
-        return True
-    except subprocess.CalledProcessError:
-        click.echo("Warning: git pull failed, continuing with local state", err=True)
-        return False
-
-
-def git_sync_after(data_dir: Path, message: str) -> bool:
-    """Commit and push any changes. Returns True if changes were pushed."""
-    try:
-        # Rebuild index before staging
-        try:
-            rebuild_index(data_dir)
-        except Exception as e:
-            click.echo(f"Warning: index rebuild failed: {e}", err=True)
-        
-        # Stage all changes
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=data_dir,
-            check=True,
-            capture_output=True,
-        )
-        
-        # Check if there are changes to commit
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        
-        if result.returncode != 0:  # There are changes
-            # Commit
-            subprocess.run(
-                ["git", "commit", "-m", f"Agent: {message[:50]}"],
-                cwd=data_dir,
-                check=True,
-                capture_output=True,
-            )
-            # Push
-            subprocess.run(
-                ["git", "push", "--quiet"],
-                cwd=data_dir,
-                check=True,
-                capture_output=True,
-            )
-            styles.console.print("\n[dim]☁️  Synced changes[/dim]")
-            return True
-        return False
-    except subprocess.CalledProcessError as e:
-        click.echo(f"Warning: git sync failed: {e}", err=True)
-        return False
 
 
 def validate_after_llm(data_dir: Path) -> bool:
@@ -308,13 +130,8 @@ def validate_after_llm(data_dir: Path) -> bool:
             for line in str(error).split('\n')[:5]:
                 click.echo(f"    {line}", err=True)
         
-        # Revert changes
-        click.echo("\nReverting changes...", err=True)
-        subprocess.run(
-            ["git", "checkout", "."],
-            cwd=data_dir,
-            capture_output=True,
-        )
+        # Revert changes (caller should handle backup/restore)
+        click.echo("\nInvalid changes detected. Please retry.", err=True)
         return False
     
     return True
@@ -439,7 +256,6 @@ def handle_free_text(text: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     # Detect intent: remove / delete
     words = text.split()
@@ -482,7 +298,7 @@ def handle_free_text(text: str) -> None:
         )
         styles.print_success(f"Removed {len(removed)} task(s).")
 
-        git_sync_after(data_dir, f"remove {len(removed)} '{query}' tasks")
+        rebuild_index(data_dir)
     else:
         styles.print_error(f"Unknown command: {text}")
         styles.console.print("[dim]Try: marvin --help[/dim]")
@@ -492,7 +308,7 @@ def handle_free_text(text: str) -> None:
 @click.group(cls=FreeTextGroup, invoke_without_command=True)
 @click.pass_context
 def main(ctx: click.Context) -> None:
-    """Marvin - Git-backed task assistant.
+    """Marvin - Task assistant for academic PIs.
     
     Quick capture: marvin add "remind me to check Sarah's draft"
     
@@ -510,7 +326,7 @@ def main(ctx: click.Context) -> None:
 def setup(force: bool) -> None:
     """Set up the data directory (run this first!).
     
-    Creates the git worktree at ~/.marvin/data with template files.
+    Creates the data directory at ~/.marvin with template files.
     This command is also run automatically on first use of any other command.
     """
     if is_setup_complete() and not force:
@@ -544,7 +360,6 @@ def add(task: str, parent_id: str | None, no_llm: bool) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     try:
         # Use hybrid approach: LLM parses NL, Python writes file
@@ -599,7 +414,7 @@ def add(task: str, parent_id: str | None, no_llm: bool) -> None:
         styles.print_error(f"Error adding task: {e}")
         sys.exit(1)
     
-    git_sync_after(data_dir, task)
+    rebuild_index(data_dir)
 
 
 @main.command("research")
@@ -624,7 +439,6 @@ def research(query: str) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     url = None
     if llm_parse.is_url(query):
@@ -668,7 +482,7 @@ def research(query: str) -> None:
         styles.print_error(f"Error: {e}")
         sys.exit(1)
     
-    git_sync_after(data_dir, f"research: {query[:30]}")
+    rebuild_index(data_dir)
 
 
 @main.command("list")
@@ -693,7 +507,6 @@ def list_tasks(
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     # Strip # from tag if present
     if tag and tag.startswith('#'):
@@ -713,7 +526,7 @@ def list_tasks(
     
     # Sync if any conference deadlines were auto-cleared
     if auto_cleared:
-        git_sync_after(data_dir, "auto-clear past conference deadlines")
+        rebuild_index(data_dir)
 
 
 @main.command("brief")
@@ -727,14 +540,13 @@ def brief(since: str, waiting: bool, deadlines: bool, fmt: str) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     # Use fast path - pure Python, no LLM
     auto_cleared = fast_path.show_brief(data_dir, waiting_focus=waiting)
     
     # Sync if any conference deadlines were auto-cleared
     if auto_cleared:
-        git_sync_after(data_dir, "auto-clear past conference deadlines")
+        rebuild_index(data_dir)
 
 
 @main.command("search")
@@ -746,7 +558,6 @@ def search(query: str, semantic: bool) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     if semantic:
         # Semantic search requires LLM
@@ -772,7 +583,6 @@ def subtasks(task_id: str) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     result = fast_path.find_task_by_id(data_dir, task_id)
     if result is None:
@@ -834,7 +644,6 @@ def edit(
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     task = fast_path.edit_task(
         data_dir,
@@ -861,7 +670,7 @@ def edit(
     if task.tags:
         styles.console.print(styles.format_tags(task.tags))
     
-    git_sync_after(data_dir, f"edit {task_id}")
+    rebuild_index(data_dir)
 
 
 @main.command("note")
@@ -882,7 +691,6 @@ def note(task_id: str, text: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     task = fast_path.add_note(data_dir, task_id, text)
 
@@ -893,7 +701,7 @@ def note(task_id: str, text: str) -> None:
     styles.print_success(f"Note added to [{task.id[:4]}] {task.description}")
     styles.console.print(styles.format_note(text))
 
-    git_sync_after(data_dir, f"note {task_id}")
+    rebuild_index(data_dir)
 
 
 @main.command("done")
@@ -911,7 +719,6 @@ def done(task_id: str) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     task = fast_path.mark_done(data_dir, task_id)
     
@@ -921,7 +728,7 @@ def done(task_id: str) -> None:
     
     styles.print_success(f"Done: [{task.id[:4]}] {task.description}")
     
-    git_sync_after(data_dir, f"done {task_id}")
+    rebuild_index(data_dir)
 
 
 @main.command("rm")
@@ -942,7 +749,6 @@ def rm(task_id: str, force: bool) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     # Find the task first to show what we're removing
     result = fast_path.find_task_by_id(data_dir, task_id)
@@ -966,7 +772,7 @@ def rm(task_id: str, force: bool) -> None:
     
     styles.print_success(f"Removed: [{removed.id[:4]}] {removed.description}")
     
-    git_sync_after(data_dir, f"rm {task_id}")
+    rebuild_index(data_dir)
 
 
 @main.command("clear-overdue")
@@ -977,7 +783,6 @@ def clear_overdue(force: bool) -> None:
         sys.exit(1)
     
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
     
     # Check if there are any overdue tasks first
     tf = fast_path.load_tasks(data_dir)
@@ -1000,150 +805,8 @@ def clear_overdue(force: bool) -> None:
         for task in cleared:
             styles.console.print(f"  [dim]•[/dim] {task.description}")
     
-    git_sync_after(data_dir, f"clear-overdue ({len(cleared)} tasks)")
+    rebuild_index(data_dir)
 
-
-@main.command("undo")
-@click.argument("count", default=1, type=int)
-def undo(count: int) -> None:
-    """Undo the last N operations (default: 1)."""
-    if not ensure_setup():
-        sys.exit(1)
-    
-    data_dir = get_data_dir()
-    
-    try:
-        # Get the commits we're about to undo
-        result = subprocess.run(
-            ["git", "log", f"-{count}", "--pretty=%s"],
-            cwd=data_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        actions = result.stdout.strip().split('\n')
-        
-        # Revert each commit in order
-        for i in range(count):
-            subprocess.run(
-                ["git", "revert", "--no-edit", f"HEAD~{i}"],
-                cwd=data_dir,
-                check=True,
-                capture_output=True,
-            )
-        
-        # Rebuild index
-        try:
-            rebuild_index(data_dir)
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=data_dir,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "commit", "--amend", "--no-edit"],
-                cwd=data_dir,
-                capture_output=True,
-            )
-        except Exception:
-            pass
-        
-        # Push the reverts
-        subprocess.run(
-            ["git", "push", "--quiet"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        
-        for action in actions:
-            click.echo(f"Undone: {action}")
-    except subprocess.CalledProcessError:
-        click.echo("Failed to undo. There may be nothing to undo, or a conflict occurred.", err=True)
-
-
-@main.command("history")
-@click.option("-n", "--count", default=5, help="Number of entries to show")
-def history(count: int) -> None:
-    """Show recent operations."""
-    if not ensure_setup():
-        sys.exit(1)
-    
-    data_dir = get_data_dir()
-    
-    result = subprocess.run(
-        ["git", "log", f"-{count}", "--pretty=format:%h  %s  (%ar)"],
-        cwd=data_dir,
-        capture_output=True,
-        text=True,
-    )
-    
-    if result.stdout.strip():
-        click.echo("Recent operations:")
-        click.echo(result.stdout)
-    else:
-        click.echo("No history found.")
-
-
-@main.command("reset")
-@click.option("--force", is_flag=True, help="Skip confirmation prompt")
-def reset(force: bool) -> None:
-    """Reset to last synced state (discards local changes)."""
-    if not ensure_setup():
-        sys.exit(1)
-    
-    data_dir = get_data_dir()
-    
-    if not force:
-        click.confirm(
-            "This will discard all local changes and reset to the last synced state. Continue?",
-            abort=True,
-        )
-    
-    try:
-        # Abort any in-progress operations
-        subprocess.run(
-            ["git", "revert", "--abort"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "merge", "--abort"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "rebase", "--abort"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        
-        # Fetch latest from remote
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=data_dir,
-            capture_output=True,
-        )
-        
-        # Get current branch name
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=data_dir,
-            capture_output=True,
-            text=True,
-        )
-        branch = result.stdout.strip() or "data"
-        
-        # Hard reset to remote
-        subprocess.run(
-            ["git", "reset", "--hard", f"origin/{branch}"],
-            cwd=data_dir,
-            check=True,
-            capture_output=True,
-        )
-        
-        click.echo("Reset complete. Local state now matches remote.")
-    except subprocess.CalledProcessError:
-        click.echo("Reset failed. You may need to manually fix the data directory.", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1200,7 +863,6 @@ def person_add(
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     try:
         collab = fast_path.add_collaborator(
@@ -1227,7 +889,7 @@ def person_add(
     if all_aliases:
         styles.console.print(f"  [dim]aliases:[/dim] [person.alias]{', '.join(all_aliases)}[/person.alias]")
 
-    git_sync_after(data_dir, f"person add {name}")
+    rebuild_index(data_dir)
 
 
 @person_group.command("list")
@@ -1237,7 +899,6 @@ def person_list() -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     cf = fast_path.load_collaborators(data_dir)
 
@@ -1272,7 +933,6 @@ def person_show(person: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     cf = fast_path.load_collaborators(data_dir)
 
@@ -1313,7 +973,6 @@ def person_note(person: str, text: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     collab = fast_path.add_collaborator_note(data_dir, person, text)
 
@@ -1333,7 +992,7 @@ def person_note(person: str, text: str) -> None:
     styles.print_success(f"Note added to {collab.name}")
     styles.console.print(styles.format_note(text))
 
-    git_sync_after(data_dir, f"person note {collab.name[:20]}")
+    rebuild_index(data_dir)
 
 
 @person_group.command("edit")
@@ -1373,7 +1032,6 @@ def person_edit(
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     collab = fast_path.edit_collaborator(
         data_dir,
@@ -1407,7 +1065,7 @@ def person_edit(
     if all_aliases:
         styles.console.print(f"  [dim]aliases:[/dim] [person.alias]{', '.join(all_aliases)}[/person.alias]")
 
-    git_sync_after(data_dir, f"person edit {collab.name[:20]}")
+    rebuild_index(data_dir)
 
 
 @person_group.command("rm")
@@ -1427,7 +1085,6 @@ def person_rm(person: str, force: bool) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     # Find first so we can confirm
     cf = fast_path.load_collaborators(data_dir)
@@ -1449,7 +1106,7 @@ def person_rm(person: str, force: bool) -> None:
     fast_path.remove_collaborator(data_dir, collab.id)
     styles.print_success(f"Removed collaborator: {collab.name}")
 
-    git_sync_after(data_dir, f"person rm {collab.name[:20]}")
+    rebuild_index(data_dir)
 
 
 @main.command("who")
@@ -1469,7 +1126,6 @@ def who(person: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     cf = fast_path.load_collaborators(data_dir)
 
@@ -1522,7 +1178,6 @@ def idea_capture(thought: str, tag: tuple[str, ...], source: str | None,
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     new_idea = fast_path.add_idea(
         data_dir,
@@ -1545,7 +1200,7 @@ def idea_capture(thought: str, tag: tuple[str, ...], source: str | None,
     styles.console.print()
     styles.console.print("[dim]Spark created. It will auto-archive in 30 days unless tended.[/dim]")
 
-    git_sync_after(data_dir, f"idea: {thought[:40]}")
+    rebuild_index(data_dir)
 
 
 class IdeasGroup(click.Group):
@@ -1589,7 +1244,6 @@ def ideas_list(
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     # Run decay first
     just_archived, warning = fast_path.run_idea_decay(data_dir)
@@ -1598,7 +1252,7 @@ def ideas_list(
         for idea in just_archived:
             styles.console.print(f"[dim]Auto-archived: {idea.thought}[/dim]")
         styles.console.print()
-        git_sync_after(data_dir, f"auto-archive {len(just_archived)} ideas")
+        rebuild_index(data_dir)
 
     idea_file = fast_path.load_ideas(data_dir)
 
@@ -1655,7 +1309,6 @@ def ideas_show(idea_id: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     result = fast_path.find_idea_by_id(data_dir, idea_id)
     if result is None:
@@ -1680,7 +1333,6 @@ def ideas_search(query: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     fast_path.search_ideas(data_dir, query)
 
@@ -1704,7 +1356,6 @@ def ideas_note(idea_id: str, text: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     idea = fast_path.add_idea_note(data_dir, idea_id, text)
     if idea is None:
@@ -1717,7 +1368,7 @@ def ideas_note(idea_id: str, text: str) -> None:
     if remaining is not None:
         styles.console.print(f"[dim]  Decay clock reset ({remaining}d remaining)[/dim]")
 
-    git_sync_after(data_dir, f"idea note {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("tag")
@@ -1734,7 +1385,6 @@ def ideas_tag(idea_id: str, tags: tuple[str, ...]) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     idea = fast_path.edit_idea(
         data_dir, idea_id,
@@ -1747,7 +1397,7 @@ def ideas_tag(idea_id: str, tags: tuple[str, ...]) -> None:
     styles.print_success(f"Updated: [{idea.id[:4]}]")
     styles.console.print(styles.format_tags(idea.tags))
 
-    git_sync_after(data_dir, f"idea tag {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("link")
@@ -1776,7 +1426,6 @@ def ideas_link(idea_id: str, person: str | None, task_id: str | None,
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     idea = fast_path.link_idea(
         data_dir, idea_id,
@@ -1791,7 +1440,7 @@ def ideas_link(idea_id: str, person: str | None, task_id: str | None,
 
     styles.print_success(f"Updated links for [{idea.id[:4]}]")
 
-    git_sync_after(data_dir, f"idea link {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("develop")
@@ -1814,7 +1463,6 @@ def ideas_develop(idea_id: str, note_text: str | None) -> None:
         note_text = click.prompt("Why is this idea worth keeping?")
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     idea = fast_path.develop_idea(data_dir, idea_id, note_text)
     if idea is None:
@@ -1824,7 +1472,7 @@ def ideas_develop(idea_id: str, note_text: str | None) -> None:
     styles.print_success(f"Developed: [{idea.id[:4]}] {idea.thought}")
     styles.console.print("[dim]  spark → developing (90-day decay clock started)[/dim]")
 
-    git_sync_after(data_dir, f"idea develop {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("mature")
@@ -1846,7 +1494,6 @@ def ideas_mature(idea_id: str, note_text: str | None) -> None:
         note_text = click.prompt("What could this idea become?")
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     idea = fast_path.mature_idea(data_dir, idea_id, note_text)
     if idea is None:
@@ -1856,7 +1503,7 @@ def ideas_mature(idea_id: str, note_text: str | None) -> None:
     styles.print_success(f"Matured: [{idea.id[:4]}] {idea.thought}")
     styles.console.print("[dim]  developing → mature (no longer decays)[/dim]")
 
-    git_sync_after(data_dir, f"idea mature {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("promote")
@@ -1880,7 +1527,6 @@ def ideas_promote(idea_id: str, deadline: str | None, parent_id: str | None,
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     result = fast_path.promote_idea(
         data_dir, idea_id,
@@ -1900,7 +1546,7 @@ def ideas_promote(idea_id: str, deadline: str | None, parent_id: str | None,
     if task.tags:
         styles.console.print(styles.format_tags(task.tags))
 
-    git_sync_after(data_dir, f"promote idea {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("archive")
@@ -1918,7 +1564,6 @@ def ideas_archive(idea_id: str) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     idea = fast_path.archive_idea(data_dir, idea_id)
     if idea is None:
@@ -1927,7 +1572,7 @@ def ideas_archive(idea_id: str) -> None:
 
     styles.print_success(f"Archived: [{idea.id[:4]}] {idea.thought}")
 
-    git_sync_after(data_dir, f"idea archive {idea_id}")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("tend")
@@ -1943,7 +1588,6 @@ def ideas_tend() -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     # Run decay first
     just_archived, _ = fast_path.run_idea_decay(data_dir)
@@ -1957,7 +1601,7 @@ def ideas_tend() -> None:
     if not needs_attention:
         styles.console.print("[green]🌱 All ideas are well-tended. Nothing needs attention.[/green]")
         if just_archived:
-            git_sync_after(data_dir, f"auto-archive {len(just_archived)} ideas")
+            rebuild_index(data_dir)
         return
 
     styles.console.print()
@@ -2009,7 +1653,7 @@ def ideas_tend() -> None:
     if parts:
         styles.console.print(f"[dim]{', '.join(parts)}[/dim]")
 
-    git_sync_after(data_dir, f"tend ideas ({tended_count} kept, {archived_count} archived)")
+    rebuild_index(data_dir)
 
 
 @ideas_group.command("rm")
@@ -2028,7 +1672,6 @@ def ideas_rm(idea_id: str, force: bool) -> None:
         sys.exit(1)
 
     data_dir = get_data_dir()
-    git_sync_before(data_dir)
 
     result = fast_path.find_idea_by_id(data_dir, idea_id)
     if result is None:
@@ -2050,7 +1693,7 @@ def ideas_rm(idea_id: str, force: bool) -> None:
 
     styles.print_success(f"Removed: [{removed.id[:4]}] {removed.thought}")
 
-    git_sync_after(data_dir, f"idea rm {idea_id}")
+    rebuild_index(data_dir)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ def rebuild_index(data_dir: Path) -> None:
     """Rebuild .index.yaml from the task and idea files.
     
     Args:
-        data_dir: Path to the data directory (e.g., ~/.marvin/data)
+        data_dir: Path to the data directory (e.g., ~/.marvin)
     """
     tasks_path = data_dir / 'tasks.json'
     

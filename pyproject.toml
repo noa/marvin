@@ -1,7 +1,7 @@
 [project]
 name = "marvin-agent"
 version = "0.1.0"
-description = "Marvin - Git-backed CLI task assistant for academic PIs"
+description = "Marvin - CLI task assistant for academic PIs"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

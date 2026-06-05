@@ -89,7 +89,7 @@ def list_tasks(
     """List tasks with filters (fast path).
     
     Returns:
-        True if any deadline tasks were auto-cleared (requires git sync).
+        True if any deadline tasks were auto-cleared (caller handles persistence).
     """
     # Raw mode: show all open tasks with full metadata (no filtering, no conference box)
     if raw:
@@ -178,7 +178,7 @@ def show_brief(data_dir: Path, *, waiting_focus: bool = False) -> bool:
     """Generate a daily briefing (fast path).
     
     Returns:
-        True if any deadline tasks were auto-cleared (requires git sync).
+        True if any deadline tasks were auto-cleared (caller handles persistence).
     """
     from rich.text import Text
     

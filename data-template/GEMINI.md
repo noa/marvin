@@ -203,15 +203,7 @@ The user may issue these types of requests:
 - **ideas tag**: Add a tag to an idea
 - **ideas link**: Link an idea to a person, task, or other idea
 
-## Restrictions
 
-**DO NOT interact with git in any way.** The wrapper handles all git operations.
-
-- Never run `git` commands
-- Never modify `.git/` or `.gitignore`
-- Never attempt to commit, push, pull, or check status
-
-If a user asks about git history or sync status, explain that the wrapper handles this automatically.
 
 ## Tag Conventions
 

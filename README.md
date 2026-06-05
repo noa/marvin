@@ -2,7 +2,7 @@
 
 > "Brain the size of a planet and here I am managing your to-do list."
 
-Git-backed CLI task assistant for academic PIs, powered by Gemini CLI.
+CLI task assistant for academic PIs, powered by Gemini CLI.
 
 ## Quick Tour: CLI vs. Agentic Usecases
 
@@ -68,10 +68,8 @@ marvin setup
 ```
 
 This automatically:
-- Creates an orphan `data` branch for your tasks
-- Sets up a git worktree at `~/.marvin/data`
+- Creates the data directory at `~/.marvin`
 - Copies template files (tasks.json, agent config)
-- Pushes to remote if available
 
 > **Note:** Setup runs automatically on first use of any command, so you can skip this and just start using `marvin`.
 
@@ -91,10 +89,10 @@ marvin search "budget"                       # Search tasks
 
 ## Configuration
 
-Set `LA_DATA_DIR` to override the default data location:
+Set `MARVIN_DATA_DIR` to override the default data location:
 
 ```bash
-export LA_DATA_DIR=/path/to/your/data
+export MARVIN_DATA_DIR=/path/to/your/data
 ```
 
 ---
@@ -106,7 +104,6 @@ Add tasks from your phone using **Siri + Apple Shortcuts**.
 ### Prerequisites
 - A server with `marvin` installed (e.g., work server, VPS)
 - SSH access from your phone to that server
-- Git credentials configured on the server for push
 
 ### Setup
 
@@ -115,7 +112,7 @@ Add tasks from your phone using **Siri + Apple Shortcuts**.
 SSH into your server and run:
 
 ```bash
-# Clone the repo (fetches both main and data branches)
+# Clone the repo and install
 git clone git@github.com:YOUR_USER/marvin.git ~/marvin
 cd ~/marvin
 
@@ -123,14 +120,14 @@ cd ~/marvin
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# Run setup to create worktree at ~/.marvin/data
+# Run setup to create data directory at ~/.marvin
 marvin setup
 
 # Verify it works
 marvin list
 ```
 
-> **Note:** The server needs Git push access. If using SSH keys, ensure `~/.ssh/id_ed25519` (or similar) is configured and the public key is added to your GitHub account.
+> **Note:** The server needs `marvin` installed and the data directory set up.
 
 #### 2. iPhone Shortcut
    
@@ -144,36 +141,6 @@ marvin list
 
 ### Usage
 
-> "Hey Siri, add todo" → *"Check Sarah's draft on Friday"* → ✅ Task synced
+> "Hey Siri, add todo" → *"Check Sarah's draft on Friday"* → ✅ Task added
 
 ---
-
-<details>
-<summary><strong>Troubleshooting: Git Worktree</strong></summary>
-
-### Don't delete the main repo
-
-The worktree at `~/.marvin/data` depends on the main repo. If you delete or move the main repo, the worktree will break.
-
-**Fix:** Re-clone the repo and run `marvin setup --force`.
-
-### Worktree path is absolute
-
-If you move your home directory or user, the worktree path breaks.
-
-**Fix:** Run `marvin setup --force` to recreate the worktree.
-
-### Cloning on a new machine
-
-After cloning on a new machine, just run `marvin setup` — it will fetch the existing `data` branch from remote and set up the worktree.
-
-### Pushing the data branch
-
-When in `~/.marvin/data`, you're on the `data` branch. Push goes to `origin/data`, not `origin/main`. The CLI handles this automatically, but if you manually edit files:
-
-```bash
-cd ~/.marvin/data
-git push  # Pushes to origin/data
-```
-
-</details>
