@@ -910,6 +910,88 @@ def main():
         )
 
     # ------------------------------------------------------------------
+    # Proactive / Daemon Tools (Always-On Marvin)
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    def get_proactive_pings(
+        dry_run: bool = True,
+        bypass_filters: bool = False,
+    ) -> str:
+        """Evaluate current knowledge state and return proactive alerts.
+
+        Assesses upcoming deadlines, collaborator blockers, subtask bottlenecks,
+        and idea decay.
+
+        Args:
+            dry_run: If True, do not record notifications or mutate cooldowns.
+            bypass_filters: If True, bypass quiet hours and daily rate limits.
+        """
+        from marvin.daemon import MarvinDaemon
+        daemon = MarvinDaemon(data_dir)
+        actionable, squelched = daemon.run_once(
+            notify=False,
+            dry_run=dry_run,
+            bypass_filters=bypass_filters,
+        )
+
+        return json.dumps(
+            {
+                "total_actionable": len(actionable),
+                "actionable_alerts": [a.model_dump(mode="json") for a in actionable],
+                "total_squelched": len(squelched),
+                "squelched_alerts": [
+                    {"alert": a.model_dump(mode="json"), "reason": reason}
+                    for a, reason in squelched
+                ],
+            },
+            indent=2,
+        )
+
+    @mcp.tool()
+    def snooze_alert(
+        item_id: str,
+        days: int = 1,
+        hours: int = 0,
+        reason: str = "",
+    ) -> str:
+        """Snooze proactive alerts for a specific task or idea.
+
+        Args:
+            item_id: Task ID, idea ID, or 4-character prefix.
+            days: Number of days to snooze.
+            hours: Number of hours to snooze.
+            reason: Optional explanation for snooze.
+        """
+        from datetime import datetime as _dt, timedelta as _td
+        from marvin.daemon_schema import load_daemon_state, save_daemon_state
+
+        now = _dt.now()
+        target_dt = now + _td(days=days, hours=hours)
+
+        state = load_daemon_state(data_dir)
+        state.snooze(item_id, target_dt, reason=reason, now_dt=now)
+        save_daemon_state(state, data_dir)
+
+        return json.dumps(
+            {
+                "success": True,
+                "item_id": item_id,
+                "snoozed_until": target_dt.isoformat(),
+                "reason": reason,
+            },
+            indent=2,
+        )
+
+    @mcp.tool()
+    def get_daemon_status() -> str:
+        """Get the current state and configuration of the Always-On daemon."""
+        from marvin.daemon_schema import load_daemon_state
+
+        state = load_daemon_state(data_dir)
+        return json.dumps(state.model_dump(mode="json"), indent=2)
+
+    # ------------------------------------------------------------------
     # Resources
     # ------------------------------------------------------------------
 

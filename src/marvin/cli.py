@@ -1696,5 +1696,236 @@ def ideas_rm(idea_id: str, force: bool) -> None:
     rebuild_index(data_dir)
 
 
+# ---------------------------------------------------------------------------
+# Status and Daemon commands (Always-On Marvin)
+# ---------------------------------------------------------------------------
+
+@main.command("status")
+@click.option("--ambient", is_flag=True, help="Print single-line summary for shell prompt/status bar.")
+@click.option("--no-emoji", is_flag=True, help="Disable emojis in status output.")
+def status_command(ambient: bool, no_emoji: bool) -> None:
+    """Show current task, deadline, and blocker status."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon import MarvinDaemon
+    daemon = MarvinDaemon(data_dir)
+
+    if ambient:
+        click.echo(daemon.get_ambient_status(use_emojis=not no_emoji))
+        return
+
+    # Full status display
+    from marvin.proactive_engine import evaluate_knowledge_state
+    from marvin.notification import ConsoleHUDNotifier
+    actionable, _ = evaluate_knowledge_state(data_dir, bypass_filters=True)
+    notifier = ConsoleHUDNotifier()
+    notifier.render_alerts(actionable, title="Current Status & Priority Triage")
+
+
+@main.group("daemon")
+def daemon_group() -> None:
+    """Always-On Marvin background daemon and proactive notifications."""
+    pass
+
+
+@daemon_group.command("run-once")
+@click.option("--notify/--no-notify", default=True, help="Dispatch notifications if alerts exist.")
+@click.option("--console/--no-console", default=True, help="Print rich HUD to console.")
+@click.option("--macos/--no-macos", default=True, help="Send macOS notification banner.")
+@click.option("--dry-run", is_flag=True, help="Evaluate without mutating state or cooldowns.")
+@click.option("--force", "-f", is_flag=True, help="Bypass quiet hours and rate limits.")
+def daemon_run_once(
+    notify: bool,
+    console: bool,
+    macos: bool,
+    dry_run: bool,
+    force: bool,
+) -> None:
+    """Run a single evaluation pass for proactive alerts."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon import MarvinDaemon
+    daemon = MarvinDaemon(data_dir)
+
+    channels = []
+    if console:
+        channels.append("console")
+    if macos:
+        channels.append("macos")
+
+    actionable, squelched = daemon.run_once(
+        notify=notify,
+        dry_run=dry_run,
+        bypass_filters=force,
+        channels=channels,
+    )
+
+    if squelched and not actionable:
+        styles.console.print(
+            f"[dim]Note: {len(squelched)} alert(s) squelched by daemon rules (quiet hours, cooldown, or snooze). Use --force to bypass.[/dim]"
+        )
+
+
+@daemon_group.command("status")
+def daemon_status_cmd() -> None:
+    """Show daemon configuration, pings sent today, active snoozes, and recent history."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon_schema import load_daemon_state
+    from rich.table import Table
+    from datetime import datetime
+
+    state = load_daemon_state(data_dir)
+    now = datetime.now()
+
+    # Config overview
+    table = Table(title="Daemon Configuration & Rate Limits", show_header=True, header_style="bold cyan")
+    table.add_column("Setting", style="dim")
+    table.add_column("Value")
+
+    table.add_row("Quiet Hours", f"{'Enabled' if state.quiet_hours.enabled else 'Disabled'} ({state.quiet_hours.start} - {state.quiet_hours.end})")
+    table.add_row("Currently in Quiet Hours", "[yellow]Yes[/yellow]" if state.quiet_hours.is_quiet(now) else "[green]No[/green]")
+    table.add_row("Max Daily Pings", str(state.rate_limits.max_daily_pings))
+    table.add_row("Pings Sent Today", f"{state.notifications_sent_today} / {state.rate_limits.max_daily_pings}")
+    table.add_row("Task Cooldown", f"{state.rate_limits.task_cooldown_hours} hours")
+    table.add_row("Idea Cooldown", f"{state.rate_limits.idea_cooldown_hours} hours")
+
+    styles.console.print(table)
+    styles.console.print()
+
+    # Active snoozes
+    active_snoozes = [s for s in state.snoozes.values() if s.is_active(now)]
+    if active_snoozes:
+        s_table = Table(title="Active Snoozes", show_header=True, header_style="bold yellow")
+        s_table.add_column("Item ID")
+        s_table.add_column("Snoozed Until")
+        s_table.add_column("Reason")
+        for s in active_snoozes:
+            s_table.add_row(s.item_id, s.snoozed_until.strftime("%Y-%m-%d %H:%M"), s.reason or "[dim]None[/dim]")
+        styles.console.print(s_table)
+    else:
+        styles.console.print("[dim]No active snoozes.[/dim]")
+
+    styles.console.print()
+
+    # Recent history
+    if state.history:
+        h_table = Table(title="Recent Notification History (last 5)", show_header=True, header_style="bold magenta")
+        h_table.add_column("Time")
+        h_table.add_column("Item")
+        h_table.add_column("Tier")
+        h_table.add_column("Reason")
+        for h in state.history[-5:]:
+            h_table.add_row(
+                h.pinged_at.strftime("%Y-%m-%d %H:%M"),
+                f"[{h.item_type}] {h.item_id}",
+                h.urgency_tier,
+                h.reason[:40],
+            )
+        styles.console.print(h_table)
+
+
+@daemon_group.command("snooze")
+@click.argument("item_id")
+@click.option("--days", "-d", type=int, default=0, help="Snooze for N days")
+@click.option("--hours", "-h", type=int, default=0, help="Snooze for N hours")
+@click.option("--until", type=str, default=None, help="Snooze until YYYY-MM-DD or YYYY-MM-DDTHH:MM")
+@click.option("--reason", "-r", type=str, default="", help="Reason for snoozing")
+def daemon_snooze_cmd(item_id: str, days: int, hours: int, until: str | None, reason: str) -> None:
+    """Snooze proactive alerts for a task or idea."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon_schema import load_daemon_state, save_daemon_state
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    if until:
+        try:
+            if "T" in until:
+                target_dt = datetime.fromisoformat(until)
+            else:
+                from datetime import date as _d
+                parsed_d = _d.fromisoformat(until)
+                target_dt = datetime.combine(parsed_d, datetime.min.time())
+        except ValueError:
+            styles.print_error(f"Invalid date format: '{until}'. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM.")
+            sys.exit(1)
+    else:
+        if days == 0 and hours == 0:
+            days = 1  # Default to 1 day
+        target_dt = now + timedelta(days=days, hours=hours)
+
+    state = load_daemon_state(data_dir)
+    state.snooze(item_id, target_dt, reason=reason, now_dt=now)
+    save_daemon_state(state, data_dir)
+
+    styles.print_success(
+        f"Snoozed alerts for '{item_id}' until {target_dt.strftime('%Y-%m-%d %H:%M')}."
+    )
+
+
+@daemon_group.command("unsnooze")
+@click.argument("item_id")
+def daemon_unsnooze_cmd(item_id: str) -> None:
+    """Remove active snooze for a task or idea."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon_schema import load_daemon_state, save_daemon_state
+
+    state = load_daemon_state(data_dir)
+    removed = state.unsnooze(item_id)
+    if removed:
+        save_daemon_state(state, data_dir)
+        styles.print_success(f"Removed snooze for '{item_id}'.")
+    else:
+        styles.console.print(f"[dim]No active snooze found for '{item_id}'.[/dim]")
+
+
+@daemon_group.command("install")
+@click.option("--interval", "-i", type=int, default=900, help="Check interval in seconds (default: 900 = 15m)")
+def daemon_install_cmd(interval: int) -> None:
+    """Install and launch macOS Launchd background service."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon import MarvinDaemon
+
+    daemon = MarvinDaemon(data_dir)
+    success = daemon.install_launchd_service(interval_seconds=interval)
+    if success:
+        styles.print_success(
+            f"Marvin Launchd daemon installed and loaded! (Checking every {interval}s)"
+        )
+        styles.console.print(f"[dim]Plist location: {daemon.get_launchd_plist_path()}[/dim]")
+    else:
+        styles.print_error("Failed to register Launchd service. Check macOS permissions.")
+
+
+@daemon_group.command("uninstall")
+def daemon_uninstall_cmd() -> None:
+    """Uninstall and remove macOS Launchd background service."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon import MarvinDaemon
+
+    daemon = MarvinDaemon(data_dir)
+    daemon.uninstall_launchd_service()
+    styles.print_success("Marvin Launchd daemon uninstalled.")
+
+
 if __name__ == "__main__":
     main()
+

@@ -85,6 +85,14 @@ marvin list -t conference                    # Filter by tag
 marvin subtasks ae23                         # View subtasks
 marvin brief                                 # Daily briefing
 marvin search "budget"                       # Search tasks
+
+# Always-On Marvin (Proactive alerts & daemon)
+marvin status                                # Full priority triage & alerts
+marvin status --ambient                      # 1-line shell prompt status (zsh/tmux)
+marvin daemon status                         # Daemon status, snoozes & pings
+marvin daemon run-once                       # Evaluate knowledge state & ping
+marvin daemon snooze ae23 --days 2           # Snooze alerts for 2 days
+marvin daemon install                        # Install macOS Launchd background service
 ```
 
 ## Configuration

@@ -113,6 +113,16 @@ marvin ideas --developing          # Only developing
 marvin ideas show ae23             # Full idea detail
 marvin ideas search "keyword"      # Search all ideas
 marvin ideas tend                  # Triage expiring ideas
+
+# Always-On Daemon & Status
+marvin status                      # Full priority & triage status
+marvin status --ambient            # 1-line prompt summary for zsh/tmux
+marvin daemon status               # Daemon config, snoozes, & ping counts
+marvin daemon run-once             # Run proactive evaluation pass
+marvin daemon snooze ae23 -d 2     # Snooze alerts for 2 days
+marvin daemon unsnooze ae23        # Remove active snooze
+marvin daemon install              # Install macOS Launchd background service
+marvin daemon uninstall            # Uninstall Launchd service
 ```
 
 ### Write commands (modify data)
@@ -184,6 +194,10 @@ marvin ideas link ae23 --person bob  # Link to person
 | Promote idea to task    | `marvin ideas promote ID`                  |
 | Tend idea garden        | `marvin ideas tend`                        |
 | Clear past-due items    | `marvin clear-overdue`                     |
+| Ambient shell status    | `marvin status --ambient`                  |
+| Daemon status & snoozes | `marvin daemon status`                     |
+| Evaluate & ping alerts  | `marvin daemon run-once`                   |
+| Snooze alert            | `marvin daemon snooze ID --days 2`         |
 
 ## Important conventions
 

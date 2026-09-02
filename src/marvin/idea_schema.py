@@ -75,17 +75,18 @@ class Idea(BaseModel):
             return DEVELOPING_WARNING_DAYS
         return None
 
-    def days_until_archive(self) -> int | None:
+    def days_until_archive(self, today: date | None = None) -> int | None:
         """Days until auto-archive, or None if no decay applies."""
         max_days = self._max_days()
         if max_days is None:
             return None
-        elapsed = (date.today() - self._decay_anchor()).days
+        ref_today = today or date.today()
+        elapsed = (ref_today - self._decay_anchor()).days
         return max(0, max_days - elapsed)
 
-    def is_warning(self) -> bool:
+    def is_warning(self, today: date | None = None) -> bool:
         """True if idea is in its warning window (approaching auto-archive)."""
-        remaining = self.days_until_archive()
+        remaining = self.days_until_archive(today)
         if remaining is None:
             return False
         threshold = self._warning_days()
@@ -93,9 +94,9 @@ class Idea(BaseModel):
             return False
         return remaining <= threshold
 
-    def is_expired(self) -> bool:
+    def is_expired(self, today: date | None = None) -> bool:
         """True if the decay clock has run out."""
-        remaining = self.days_until_archive()
+        remaining = self.days_until_archive(today)
         if remaining is None:
             return False
         return remaining == 0
