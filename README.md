@@ -2,8 +2,6 @@
 
 > "Brain the size of a planet and here I am managing your to-do list."
 
-CLI task assistant for academic PIs, powered by Gemini CLI.
-
 ## Quick Tour: CLI vs. Agentic Usecases
 
 Marvin operates in two modes: as a terminal CLI (`marvin` or `la`), and as an **MCP (Model Context Protocol) Server** that enables AI assistants (like Claude Desktop) to manage your research tasks, collaborator network, and research ideas.
