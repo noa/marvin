@@ -160,3 +160,34 @@ def test_cli_email_logout(runner, cli_env: Path):
     assert result.exit_code == 0
     assert "Signed out from Microsoft Graph" in result.output
     assert not (cli_env / "email_auth.json").exists()
+
+
+def test_cli_email_agent_triage_unauthenticated(runner, cli_env: Path):
+    """Test email agent-triage fails if not logged in."""
+    res = runner.invoke(main, ["email", "agent-triage"])
+    assert res.exit_code == 1
+    assert "Not signed in" in res.output
+
+
+def test_cli_email_agent_triage_single_email(runner, cli_env: Path):
+    """Test email agent-triage with a specific email ID."""
+    tokens = EmailAuthTokens(
+        client_id="app-123",
+        tenant_id="org",
+        account_email="noa@jhu.edu",
+        access_token="tok",
+        expires_at=time.time() + 3600,
+    )
+    save_email_auth(tokens, cli_env)
+
+    mock_res = {
+        "status": "success",
+        "actions_taken": ["Unblocked task ae23", "Created task [b123] Review revisions"],
+    }
+    with patch("marvin.email_triage.run_agentic_email_triage", return_value=mock_res) as mock_agent:
+        res = runner.invoke(main, ["email", "agent-triage", "msg-999"])
+        assert res.exit_code == 0
+        assert "Agent triage completed for msg-999" in res.output
+        assert "Unblocked task ae23" in res.output
+        assert "Created task [b123]" in res.output
+        mock_agent.assert_called_once()

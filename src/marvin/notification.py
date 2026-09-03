@@ -150,7 +150,7 @@ class ConsoleHUDNotifier:
                 "subtask_bottleneck": "⚠️",
                 "blocker": "🛑",
                 "idea_decay": "🌱",
-                "triage": "📋",
+                "triage": "✉" if alert.item_type == "email" else "📋",
             }.get(alert.category, "•")
 
             panel_title = f"[{category_color}]{category_icon} {alert.title} (Score: {alert.urgency_score:.0f})[/{category_color}]"
@@ -184,6 +184,7 @@ class AmbientStatusFormatter:
         overdue_count: int,
         blocker_count: int,
         expiring_ideas_count: int,
+        untriaged_emails_count: int = 0,
         use_emojis: bool = True,
     ) -> str:
         """Format a single-line ambient status string."""
@@ -204,6 +205,10 @@ class AmbientStatusFormatter:
         if expiring_ideas_count > 0:
             icon = "🌱 " if use_emojis else ""
             parts.append(f"{icon}{expiring_ideas_count} expiring ideas")
+
+        if untriaged_emails_count > 0:
+            icon = "✉ " if use_emojis else ""
+            parts.append(f"{icon}{untriaged_emails_count} untriaged")
 
         if not parts:
             icon = "✓ " if use_emojis else ""

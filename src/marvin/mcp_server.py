@@ -913,15 +913,17 @@ def create_mcp_server(data_dir: Path | str | None = None):
     def get_proactive_pings(
         dry_run: bool = True,
         bypass_filters: bool = False,
+        enable_agent: bool = False,
     ) -> str:
         """Evaluate current knowledge state and return proactive alerts.
 
         Assesses upcoming deadlines, collaborator blockers, subtask bottlenecks,
-        and idea decay.
+        idea decay, and incoming collaborator emails.
 
         Args:
             dry_run: If True, do not record notifications or mutate cooldowns.
             bypass_filters: If True, bypass quiet hours and daily rate limits.
+            enable_agent: If True, trigger Tier 2 autonomous agentic escalation for complex triage.
         """
         from marvin.daemon import MarvinDaemon
         daemon = MarvinDaemon(data_dir)
@@ -929,6 +931,7 @@ def create_mcp_server(data_dir: Path | str | None = None):
             notify=False,
             dry_run=dry_run,
             bypass_filters=bypass_filters,
+            enable_agent=enable_agent,
         )
 
         return json.dumps(

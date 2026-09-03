@@ -203,3 +203,36 @@ def test_daemon_state_history_rotation():
     assert len(state.history) == 100
     assert state.history[0].item_id == "t_20"
     assert state.history[-1].item_id == "t_119"
+
+
+def test_daemon_state_email_cooldown_and_untriaged_count(tmp_path: Path):
+    """Test email-specific cooldown and untriaged email tracking."""
+    state = DaemonState()
+    state.quiet_hours.enabled = True
+    state.quiet_hours.start = "22:00"
+    state.quiet_hours.end = "07:30"
+    state.rate_limits.email_cooldown_hours = 24
+    state.untriaged_emails_count = 5
+    now = datetime(2026, 9, 1, 14, 0)
+
+    # 1. First email ping allowed
+    can_ping, _ = state.can_ping_item("msg-101", "email", "urgent_email_action", now_dt=now)
+    assert can_ping is True
+    state.record_notification("msg-101", "email", "urgent_email_action", "Action needed", now_dt=now)
+
+    # 2. Cooldown active 6 hours later
+    t_later = now + timedelta(hours=6)
+    can_ping2, reason2 = state.can_ping_item("msg-101", "email", "urgent_email_action", now_dt=t_later)
+    assert can_ping2 is False
+    assert "cooldown_active" in reason2
+
+    # 3. Urgent blocker reply bypasses quiet hours
+    t_night = datetime(2026, 9, 1, 23, 30)
+    can_ping_crit, _ = state.can_ping_item("msg-102", "email", "urgent_blocker_reply", now_dt=t_night)
+    assert can_ping_crit is True
+
+    # 4. Serialization preserves untriaged_emails_count
+    save_daemon_state(state, tmp_path)
+    loaded = load_daemon_state(tmp_path)
+    assert loaded.untriaged_emails_count == 5
+    assert loaded.rate_limits.email_cooldown_hours == 24

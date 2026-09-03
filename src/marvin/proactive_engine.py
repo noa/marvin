@@ -5,14 +5,15 @@ subtask bottlenecks, and idea garden decay. Computes urgency scores and
 filters alerts through the daemon state / squelch engine.
 """
 
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from marvin import fast_path
-from marvin.daemon_schema import DaemonState, load_daemon_state
+from marvin.daemon_schema import DaemonState, load_daemon_state, save_daemon_state
 from marvin.task_schema import Task, TaskFile
 from marvin.collaborator_schema import Collaborator, CollaboratorFile
 from marvin.idea_schema import Idea, IdeaFile
@@ -31,7 +32,7 @@ class ProactiveAlert(BaseModel):
 
     id: str
     item_id: str
-    item_type: Literal["task", "idea", "collaborator", "general"]
+    item_type: Literal["task", "idea", "collaborator", "email", "general"]
     title: str
     narrative: str
     urgency_tier: str  # e.g., "t_minus_24h", "t_minus_3d", "overdue", "stagnant_wait", "decay_warning"
@@ -325,12 +326,219 @@ def _eval_ideas(
     return alerts
 
 
+URGENT_ACTION_REGEX = re.compile(
+    r"\b(deadline|grant|proposal|review|action required|urgent|subaward|nih|nsf|darpa|award|amendment|contract|budget|compliance)\b",
+    re.IGNORECASE,
+)
+COMPLEX_TOPIC_REGEX = re.compile(
+    r"\b(amendment|budget|contract|subaward|compliance|no-cost extension|scheduling)\b",
+    re.IGNORECASE,
+)
+
+
+def _eval_emails(
+    data_dir: Path,
+    today: date,
+    now_dt: datetime,
+    client: Any | None = None,
+) -> tuple[list[ProactiveAlert], int]:
+    """Evaluate unread Outlook emails for blocker resolutions and urgent action requests.
+
+    Returns:
+        (email_alerts, untriaged_count)
+    """
+    from marvin.email_schema import load_email_auth
+
+    auth = load_email_auth(data_dir)
+    if not auth and client is None:
+        return [], 0
+
+    if client is None:
+        try:
+            import httpx
+            from marvin.email_client import MicrosoftGraphClient
+
+            client = MicrosoftGraphClient(data_dir, http_client=httpx.Client(timeout=5.0))
+        except Exception:
+            return [], 0
+
+    from marvin.email_triage import get_triage_candidates
+
+    try:
+        candidates = get_triage_candidates(
+            data_dir,
+            client,
+            limit=15,
+            unread_only=True,
+            include_triaged=False,
+        )
+    except Exception:
+        return [], 0
+
+    untriaged_count = len(candidates)
+    alerts: list[ProactiveAlert] = []
+
+    for candidate in candidates:
+        email = candidate.email
+        sender_name = (
+            candidate.collaborator.name
+            if candidate.collaborator
+            else (email.sender.name if email.sender else None)
+        )
+        sender_disp = sender_name or (email.sender.address if email.sender else "Sender")
+
+        # 1. Blocker Reply
+        if candidate.waiting_tasks:
+            is_complex = (
+                len(candidate.waiting_tasks) > 1
+                or bool(COMPLEX_TOPIC_REGEX.search(email.subject or ""))
+                or bool(COMPLEX_TOPIC_REGEX.search(email.body_preview or ""))
+            )
+
+            if is_complex or len(candidate.waiting_tasks) > 1:
+                # Ambiguous / Complex Blocker -> Tier 2 Escalation Candidate
+                task_count = len(candidate.waiting_tasks)
+                desc_list = ", ".join(f"'{t['description'][:25]}'" for t in candidate.waiting_tasks[:2])
+                narrative = (
+                    f"{sender_disp} replied with '{email.subject}', which could relate to {task_count} waiting tasks ({desc_list}). "
+                    f"Agent reasoning recommended to triage and unblock."
+                )
+                actions = [
+                    ProactiveAction(
+                        label="Agent Triage",
+                        action_type="agent_triage",
+                        payload={"email_id": email.id},
+                    ),
+                    ProactiveAction(
+                        label="Manual Triage",
+                        action_type="email_triage",
+                        payload={"email_id": email.id},
+                    ),
+                    ProactiveAction(
+                        label="Snooze 24h",
+                        action_type="snooze",
+                        payload={"item_id": email.id, "hours": 24},
+                    ),
+                ]
+                alerts.append(
+                    ProactiveAlert(
+                        id=f"alert_complex_email_{email.id}",
+                        item_id=email.id,
+                        item_type="email",
+                        title=f"Triage Needed: {sender_disp} ({email.subject[:30]})",
+                        narrative=narrative,
+                        urgency_tier="ambiguous_blocker_reply",
+                        urgency_score=88.0,
+                        category="triage",
+                        actions=actions,
+                        created_at=now_dt,
+                    )
+                )
+            else:
+                # Simple Blocker Resolution (Single task match)
+                task_info = candidate.waiting_tasks[0]
+                task_id = task_info["id"]
+                task_short = task_info["short_id"]
+                task_desc = task_info["description"]
+                score = 85.0
+                if task_info.get("priority") == "high" or email.importance == "high":
+                    score = 95.0
+
+                urgency_tier = "urgent_blocker_reply" if score >= 90.0 else "blocker_reply"
+                narrative = (
+                    f"Email from {sender_disp} ('{email.subject}') may resolve blocker on task: '{task_desc}'."
+                )
+                actions = [
+                    ProactiveAction(
+                        label=f"Unblock Task {task_short}",
+                        action_type="unblock",
+                        payload={"task_id": task_id, "email_id": email.id},
+                    ),
+                    ProactiveAction(
+                        label="Add Note",
+                        action_type="note",
+                        payload={"task_id": task_id},
+                    ),
+                    ProactiveAction(
+                        label="Snooze 24h",
+                        action_type="snooze",
+                        payload={"item_id": task_id, "hours": 24},
+                    ),
+                ]
+                alerts.append(
+                    ProactiveAlert(
+                        id=f"alert_email_blocker_{email.id}_{task_short}",
+                        item_id=task_id,
+                        item_type="task",
+                        title=f"{sender_disp} replied: {email.subject[:35]}",
+                        narrative=narrative,
+                        urgency_tier=urgency_tier,
+                        urgency_score=score,
+                        category="blocker",
+                        actions=actions,
+                        created_at=now_dt,
+                    )
+                )
+
+        # 2. Urgent Action Keywords (not an existing blocker, but urgent request)
+        elif URGENT_ACTION_REGEX.search(email.subject or "") or (email.importance == "high"):
+            score = 75.0
+            if email.importance == "high":
+                score = 85.0
+            urgency_tier = "urgent_email_action"
+
+            narrative = (
+                f"High-priority email from {sender_disp}: '{email.subject}'. "
+                f"May require task creation or immediate response."
+            )
+            actions = [
+                ProactiveAction(
+                    label="Create Task",
+                    action_type="create_task",
+                    payload={"email_id": email.id},
+                ),
+                ProactiveAction(
+                    label="Agent Triage",
+                    action_type="agent_triage",
+                    payload={"email_id": email.id},
+                ),
+                ProactiveAction(
+                    label="Dismiss",
+                    action_type="dismiss_email",
+                    payload={"email_id": email.id},
+                ),
+                ProactiveAction(
+                    label="Snooze 24h",
+                    action_type="snooze",
+                    payload={"item_id": email.id, "hours": 24},
+                ),
+            ]
+            alerts.append(
+                ProactiveAlert(
+                    id=f"alert_urgent_email_{email.id}",
+                    item_id=email.id,
+                    item_type="email",
+                    title=f"Action Email: {email.subject[:35]}",
+                    narrative=narrative,
+                    urgency_tier=urgency_tier,
+                    urgency_score=score,
+                    category="triage",
+                    actions=actions,
+                    created_at=now_dt,
+                )
+            )
+
+    return alerts, untriaged_count
+
+
 def evaluate_knowledge_state(
     data_dir: Path,
     now_dt: datetime | None = None,
     bypass_filters: bool = False,
+    include_email: bool = True,
+    email_client: Any | None = None,
 ) -> tuple[list[ProactiveAlert], list[tuple[ProactiveAlert, str]]]:
-    """Assess the state of tasks, collaborators, and ideas.
+    """Assess the state of tasks, collaborators, ideas, and emails.
 
     Returns:
         (actionable_alerts, squelched_alerts_with_reasons)
@@ -349,13 +557,29 @@ def evaluate_knowledge_state(
     all_raw_alerts.extend(_eval_blockers(tf, cf, today, now))
     all_raw_alerts.extend(_eval_ideas(idea_file, today, now))
 
+    if include_email:
+        email_alerts, untriaged_count = _eval_emails(data_dir, today, now, client=email_client)
+        all_raw_alerts.extend(email_alerts)
+        daemon_state.untriaged_emails_count = untriaged_count
+        try:
+            save_daemon_state(daemon_state, data_dir)
+        except Exception:
+            pass
+
     # Sort raw alerts by urgency score
     all_raw_alerts.sort(key=lambda a: a.urgency_score, reverse=True)
 
     actionable_alerts: list[ProactiveAlert] = []
     squelched_alerts: list[tuple[ProactiveAlert, str]] = []
 
-    critical_tiers = ("due_today", "overdue", "t_minus_24h", "urgent_deadline", "t_minus_2h")
+    critical_tiers = (
+        "due_today",
+        "overdue",
+        "t_minus_24h",
+        "urgent_deadline",
+        "t_minus_2h",
+        "urgent_blocker_reply",
+    )
     admitted_non_critical = daemon_state.notifications_sent_today
 
     for alert in all_raw_alerts:

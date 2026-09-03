@@ -17,6 +17,7 @@ from marvin.email_triage import (
     find_tasks_waiting_on_sender,
     get_triage_candidates,
     resolve_email_blocker,
+    run_agentic_email_triage,
 )
 from marvin.idea_schema import IdeaFile, save_idea_file
 from marvin.task_schema import Task, TaskFile, save_task_file
@@ -210,3 +211,78 @@ def test_dismiss_email(populated_dir: Path):
     dismiss_email(populated_dir, "msg-dismissed")
     state = load_email_state(populated_dir)
     assert state.is_triaged("msg-dismissed")
+
+
+def test_run_agentic_email_triage_gemini_missing(populated_dir: Path):
+    """Test that missing Gemini CLI returns manual_needed status gracefully."""
+    from unittest.mock import patch
+
+    email = EmailMessage(
+        id="email-agent-1",
+        subject="Re: Review ablation experiments",
+        sender=EmailAddress(name="Alice Chen", address="alice@jhu.edu"),
+        body_content="Here are the results you asked for.",
+    )
+
+    with patch("shutil.which", return_value=None):
+        res = run_agentic_email_triage(populated_dir, candidate=MagicMock(email=email, collaborator=None, waiting_tasks=[]))
+        assert res["status"] == "manual_needed"
+        assert res["reason"] == "gemini_cli_not_found"
+        assert "Gemini CLI not found" in res["message"]
+
+
+def test_run_agentic_email_triage_success(populated_dir: Path):
+    """Test successful agentic triage executing parsed actions."""
+    import json
+    from unittest.mock import patch, MagicMock
+
+    email = EmailMessage(
+        id="email-agent-2",
+        subject="Re: Review ablation experiments",
+        sender=EmailAddress(name="Alice Chen", address="alice@jhu.edu"),
+        body_content="I ran the experiments and verified the results.",
+    )
+
+    mock_llm_json = json.dumps({
+        "thought": "Alice completed the ablation experiments, resolving task1. Also need a new task to draft results.",
+        "actions": [
+            {
+                "type": "unblock_task",
+                "task_id": "task1",
+                "note": "Ablations verified by Alice."
+            },
+            {
+                "type": "create_task",
+                "description": "Draft ablation results section",
+                "priority": "high",
+                "deadline": "2026-09-15"
+            }
+        ]
+    })
+
+    mock_proc = MagicMock(returncode=0, stdout=f"```json\n{mock_llm_json}\n```", stderr="")
+
+    with patch("shutil.which", return_value="/usr/local/bin/gemini"), \
+         patch("subprocess.run", return_value=mock_proc):
+        res = run_agentic_email_triage(
+            populated_dir,
+            candidate=MagicMock(
+                email=email,
+                collaborator=MagicMock(name="Alice Chen", role="PhD student"),
+                waiting_tasks=[{"id": "task1", "short_id": "task", "description": "Review ablation experiments", "waiting_on": "Alice Chen"}],
+            ),
+        )
+
+        assert res["status"] == "success"
+        assert len(res["actions_taken"]) == 2
+        assert "Unblocked task task1" in res["actions_taken"][0]
+        assert "Created task" in res["actions_taken"][1]
+
+        # Verify task1 is unblocked
+        tf = fast_path.load_tasks(populated_dir)
+        t1 = next(t for t in tf.tasks if t.id == "task1")
+        assert t1.waiting_on is None
+        assert any("Ablations verified by Alice." in n for n in t1.notes)
+
+        # Verify new task created
+        assert any(t.description == "Draft ablation results section" for t in tf.tasks)
