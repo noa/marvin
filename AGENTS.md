@@ -58,6 +58,7 @@ Use Marvin when the user asks about:
 - Collaborator info (roles, affiliations, notes)
 - Searching or filtering tasks by keyword or tag
 - Research ideas and brainstorming
+- Microsoft Graph Outlook emails and inbox triage
 
 ## Data directory
 
@@ -72,7 +73,9 @@ The data directory contains:
 │   └── settings.json    # Tool restrictions (no shell access)
 ├── tasks.json           # All tasks (JSON, Pydantic-validated)
 ├── collaborators.json   # Collaborator/people records
-└── ideas.json           # Idea garden (JSON, Pydantic-validated)
+├── ideas.json           # Idea garden (JSON, Pydantic-validated)
+├── email_auth.json      # Microsoft Graph OAuth2 credentials (mode 0600)
+└── email_state.json     # Email triage history and task linkages
 ```
 
 ## Command reference
@@ -123,11 +126,22 @@ marvin daemon snooze ae23 -d 2     # Snooze alerts for 2 days
 marvin daemon unsnooze ae23        # Remove active snooze
 marvin daemon install              # Install macOS Launchd background service
 marvin daemon uninstall            # Uninstall Launchd service
+
+# Email (Microsoft Graph Outlook)
+marvin email status                # Check connection and account info
+marvin email list                  # List recent emails with collaborator tags
+marvin email list --unread         # Unread emails only
+marvin email show 1a2b3c4d         # View full email content and body
 ```
 
 ### Write commands (modify data)
 
 ```bash
+# Email management & triage
+marvin email login                 # Sign in via M365 Device Code flow
+marvin email triage                # Interactive email triage (task/unblock/idea)
+marvin email logout                # Disconnect Microsoft account
+
 # Task creation
 marvin add "remind me to check Sarah's draft on Friday"
 marvin add --parent ae23 "run ablation study"
@@ -198,6 +212,10 @@ marvin ideas link ae23 --person bob  # Link to person
 | Daemon status & snoozes | `marvin daemon status`                     |
 | Evaluate & ping alerts  | `marvin daemon run-once`                   |
 | Snooze alert            | `marvin daemon snooze ID --days 2`         |
+| Email login             | `marvin email login`                       |
+| Email list              | `marvin email list --unread`               |
+| Email triage            | `marvin email triage`                      |
+| Email status            | `marvin email status`                      |
 
 ## Important conventions
 
@@ -234,6 +252,22 @@ Register in your MCP client configuration:
   }
 }
 ```
+
+### Email Tools in MCP
+When configured, Marvin exposes Microsoft Graph Outlook tools to AI assistants:
+- `get_email_status()`: Verify Microsoft 365 connection and account email
+- `list_emails(limit, unread_only, folder, query)`: Retrieve recent emails cross-referenced with Marvin's collaborator database
+- `get_email(email_id)`: Retrieve full email content and clean body text
+- `triage_emails(limit, unread_only)`: Evaluate inbox against open tasks and waiting-on blockers, surfacing blocker resolutions and suggested action items
+- `create_task_from_email(email_id, description, deadline, priority, waiting_on)`: Create a task linked to an email
+- `resolve_email_blocker(task_id, email_id, note)`: Clear `@waiting` blocker on a task resolved by an incoming email
+- `mark_email_read(email_id)`: Mark email as read / triaged
+
+### 5. Email Triage & Blocker Resolution (Agentic Mode)
+* **Agentic Mode**: Tell your AI assistant to check unread emails and unblock waiting tasks.
+  ```bash
+  claude "check my unread emails: if Alice replied about the paper draft, unblock the draft review task and mark her email as triaged"
+  ```
 
 ## Cross-tool integration with Smaug
 

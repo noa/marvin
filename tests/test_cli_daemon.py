@@ -84,32 +84,58 @@ def test_daemon_run_once_dry_run(runner, cli_env):
 
 
 def test_daemon_snooze_and_unsnooze(runner, cli_env):
-    """Test marvin daemon snooze and unsnooze commands."""
+    """Test marvin daemon snooze and unsnooze commands with prefix matching."""
+    today = date.today()
+    tf = TaskFile(
+        project="default",
+        tasks=[
+            Task(id="ae23f1", description="Important grant", deadline=today, priority="high"),
+        ],
+    )
+    save_task_file(tf, cli_env / "tasks.json")
+
+    # Snooze with 4-char prefix
     res_snooze = runner.invoke(main, ["daemon", "snooze", "ae23", "--days", "2", "--reason", "Waiting on funding"])
     assert res_snooze.exit_code == 0
-    assert "Snoozed alerts for 'ae23'" in res_snooze.output
+    assert "Snoozed alerts for 'ae23f1'" in res_snooze.output
 
     # Check that status shows the active snooze
     res_status = runner.invoke(main, ["daemon", "status"])
     assert res_status.exit_code == 0
-    assert "ae23" in res_status.output
+    assert "ae23f1" in res_status.output
     assert "Waiting on funding" in res_status.output
 
-    # Unsnooze
+    # Verify run-once squelches the task
+    from marvin.daemon import MarvinDaemon
+    daemon = MarvinDaemon(cli_env)
+    actionable, squelched = daemon.run_once(notify=False, dry_run=True, bypass_filters=False)
+    assert len(actionable) == 0
+    assert len(squelched) == 1
+    assert squelched[0][0].item_id == "ae23f1"
+
+    # Unsnooze with 4-char prefix
     res_unsnooze = runner.invoke(main, ["daemon", "unsnooze", "ae23"])
     assert res_unsnooze.exit_code == 0
     assert "Removed snooze for 'ae23'" in res_unsnooze.output
 
+    actionable2, squelched2 = daemon.run_once(notify=False, dry_run=True, bypass_filters=False)
+    assert len(actionable2) == 1
+    assert actionable2[0].item_id == "ae23f1"
+
 
 def test_daemon_install_and_uninstall(runner, cli_env):
     """Test marvin daemon install and uninstall with mocked launchctl."""
-    with patch("subprocess.run") as mock_run:
+    fake_plist = cli_env / "fake_daemon.plist"
+    with patch("subprocess.run") as mock_run, \
+         patch("marvin.daemon.MarvinDaemon.get_launchd_plist_path", return_value=fake_plist):
         mock_run.return_value = MagicMock(returncode=0)
 
         res_install = runner.invoke(main, ["daemon", "install", "--interval", "600"])
         assert res_install.exit_code == 0
         assert "Launchd daemon installed" in res_install.output
+        assert fake_plist.exists()
 
         res_uninstall = runner.invoke(main, ["daemon", "uninstall"])
         assert res_uninstall.exit_code == 0
         assert "Launchd daemon uninstalled" in res_uninstall.output
+        assert not fake_plist.exists()

@@ -7,6 +7,8 @@ This is a task management repository for an academic PI.
 - `tasks.json`: All tasks stored in a single JSON file
 - `collaborators.json`: Collaborator/people records
 - `ideas.json`: Idea garden for research sparks and brainstorming
+- `email_auth.json`: Microsoft Graph OAuth2 credentials (mode 0600)
+- `email_state.json`: Email triage state and task linkages
 
 ## Task Structure
 

@@ -56,7 +56,7 @@ def _eval_deadlines(
         blocked_children = [c for c in open_children if c.waiting_on]
 
         # 1. Overdue Tasks
-        if task.is_overdue():
+        if task.is_overdue(today=today):
             days_overdue = (today - task.deadline).days
             score = min(100.0, 70.0 + (days_overdue * 4.0))
             if task.priority == "high":
@@ -108,10 +108,10 @@ def _eval_deadlines(
             score = 0.0
 
             if days_until == 0:
-                tier = "t_minus_24h"
-                score = 90.0
+                tier = "due_today"
+                score = 95.0
             elif days_until == 1:
-                tier = "t_minus_24h"
+                tier = "due_tomorrow"
                 score = 80.0
             elif 2 <= days_until <= 3:
                 tier = "t_minus_3d"
@@ -208,7 +208,8 @@ def _eval_blockers(
             elif collab.role:
                 role_desc = collab.role
 
-        days_waiting = (today - task.created_at).days
+        ref_date = task.waiting_since or task.created_at
+        days_waiting = (today - ref_date).days
         if days_waiting >= threshold_days:
             score = min(85.0, 50.0 + (days_waiting * 3.0))
             if task.priority == "high":
@@ -241,7 +242,7 @@ def _eval_blockers(
                 ProactiveAlert(
                     id=f"alert_blocker_{task.id}_{days_waiting}d",
                     item_id=task.id,
-                    item_type="task",
+                    item_type="collaborator",
                     title=f"Waiting on {person_query} ({days_waiting}d)",
                     narrative=narrative,
                     urgency_tier="stagnant_wait",
@@ -275,10 +276,12 @@ def _eval_ideas(
         if days_left <= 5:
             score = max(35.0, 75.0 - (days_left * 8.0))
             time_str = "TODAY" if days_left == 0 else f"in {days_left} days"
+            last_tended = idea.last_tended_at or idea.created_at
+            last_tended_str = last_tended.isoformat()
 
             narrative = (
                 f"Your {idea.status} '{idea.thought}' will auto-decay {time_str} "
-                f"(last tended: {idea.last_tended_at.isoformat()})."
+                f"(last tended: {last_tended_str})."
             )
 
             actions = [
@@ -352,7 +355,11 @@ def evaluate_knowledge_state(
     actionable_alerts: list[ProactiveAlert] = []
     squelched_alerts: list[tuple[ProactiveAlert, str]] = []
 
+    critical_tiers = ("due_today", "overdue", "t_minus_24h", "urgent_deadline", "t_minus_2h")
+    admitted_non_critical = daemon_state.notifications_sent_today
+
     for alert in all_raw_alerts:
+        is_crit = alert.urgency_tier in critical_tiers
         can_ping, reason = daemon_state.can_ping_item(
             item_id=alert.item_id,
             item_type=alert.item_type,
@@ -361,9 +368,15 @@ def evaluate_knowledge_state(
             bypass_rate_limit=bypass_filters,
         )
 
-        if can_ping or bypass_filters:
+        if bypass_filters:
             actionable_alerts.append(alert)
-        else:
+        elif not can_ping:
             squelched_alerts.append((alert, reason))
+        elif not is_crit and admitted_non_critical >= daemon_state.rate_limits.max_daily_pings:
+            squelched_alerts.append((alert, "daily_rate_limit_reached"))
+        else:
+            actionable_alerts.append(alert)
+            if not is_crit:
+                admitted_non_critical += 1
 
     return actionable_alerts, squelched_alerts

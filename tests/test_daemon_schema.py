@@ -143,3 +143,63 @@ def test_daemon_state_save_and_load(tmp_path: Path):
     assert len(loaded.history) == 1
     assert loaded.history[0].item_id == "task2"
     assert "task1" in loaded.snoozes
+
+
+def test_daemon_state_prefix_snooze():
+    """Test that 4-character prefix snoozes match full 6-character task IDs."""
+    state = DaemonState()
+    now = datetime(2026, 9, 1, 12, 0)
+    state.quiet_hours.enabled = False
+
+    # Snooze with 4-char prefix
+    state.snooze("ae23", now + timedelta(days=2), reason="Blocked", now_dt=now)
+
+    # Lookup with full ID
+    snooze_rec = state.get_active_snooze("ae23f1", now)
+    assert snooze_rec is not None
+    assert snooze_rec.reason == "Blocked"
+
+    # can_ping_item with full ID should be blocked
+    can_ping, reason = state.can_ping_item("ae23f1", "task", "due_today", now_dt=now)
+    assert can_ping is False
+    assert "snoozed_until" in reason
+
+    # Unsnooze with 4-char prefix
+    assert state.unsnooze("ae23") is True
+    assert state.get_active_snooze("ae23f1", now) is None
+
+
+def test_daemon_state_critical_cooldown_escalation():
+    """Test that due_today and overdue escalate and bypass cooldown."""
+    state = DaemonState()
+    state.quiet_hours.enabled = False
+    state.rate_limits.task_cooldown_hours = 48
+    now = datetime(2026, 9, 1, 10, 0)
+
+    # 1. Ping due_tomorrow
+    can_ping, _ = state.can_ping_item("task1", "task", "due_tomorrow", now_dt=now)
+    assert can_ping is True
+    state.record_notification("task1", "task", "due_tomorrow", "Due tomorrow", now_dt=now)
+
+    # 2. Next morning (20h later), now due_today -> should escalate and bypass cooldown
+    t_today = now + timedelta(hours=20)
+    can_ping_today, _ = state.can_ping_item("task1", "task", "due_today", now_dt=t_today)
+    assert can_ping_today is True
+    state.record_notification("task1", "task", "due_today", "Due today", now_dt=t_today)
+
+    # 3. Next day (24h later), now overdue -> should escalate and bypass cooldown
+    t_overdue = t_today + timedelta(hours=24)
+    can_ping_overdue, _ = state.can_ping_item("task1", "task", "overdue", now_dt=t_overdue)
+    assert can_ping_overdue is True
+
+
+def test_daemon_state_history_rotation():
+    """Test that notification history is capped at MAX_HISTORY_ENTRIES."""
+    state = DaemonState()
+    now = datetime(2026, 9, 1, 10, 0)
+    for i in range(120):
+        state.record_notification(f"t_{i}", "task", "due_today", f"Task {i}", now_dt=now + timedelta(minutes=i))
+
+    assert len(state.history) == 100
+    assert state.history[0].item_id == "t_20"
+    assert state.history[-1].item_id == "t_119"

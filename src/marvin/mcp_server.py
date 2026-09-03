@@ -96,8 +96,8 @@ def _idea_to_dict(idea) -> dict:
 
 
 
-def main():
-    """Entry point for the marvin-mcp command."""
+def create_mcp_server(data_dir: Path | str | None = None):
+    """Create and configure the FastMCP server instance."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError:
@@ -112,6 +112,11 @@ def main():
     from marvin import llm_parse
     from marvin.collaborator_schema import resolve_person
 
+    if data_dir is None:
+        data_dir = Path(_get_data_dir()).expanduser()
+    elif isinstance(data_dir, str):
+        data_dir = Path(data_dir).expanduser()
+
     mcp = FastMCP(
         "marvin",
         instructions=(
@@ -119,15 +124,6 @@ def main():
             "Manages tasks, deadlines, collaborators, and waiting-on items."
         ),
     )
-
-    # Allow --data-dir override via argv
-    data_dir_str = _get_data_dir()
-    for i, arg in enumerate(sys.argv[1:], 1):
-        if arg == "--data-dir" and i < len(sys.argv) - 1:
-            data_dir_str = sys.argv[i + 1]
-            break
-
-    data_dir = Path(data_dir_str).expanduser()
 
     # ------------------------------------------------------------------
     # Read Tools
@@ -969,16 +965,53 @@ def main():
         now = _dt.now()
         target_dt = now + _td(days=days, hours=hours)
 
+        clean_arg = item_id.lower().strip()
+        canonical_id = item_id
+        tf = fast_path.load_tasks(data_dir)
+        for t in tf.tasks:
+            if t.id.lower() == clean_arg or (len(clean_arg) >= 4 and t.id.lower().startswith(clean_arg)):
+                canonical_id = t.id
+                break
+        else:
+            ideas = fast_path.load_ideas(data_dir)
+            for i in ideas.ideas:
+                if i.id.lower() == clean_arg or (len(clean_arg) >= 4 and i.id.lower().startswith(clean_arg)):
+                    canonical_id = i.id
+                    break
+
         state = load_daemon_state(data_dir)
-        state.snooze(item_id, target_dt, reason=reason, now_dt=now)
+        state.snooze(canonical_id, target_dt, reason=reason, now_dt=now)
         save_daemon_state(state, data_dir)
 
         return json.dumps(
             {
                 "success": True,
-                "item_id": item_id,
+                "item_id": canonical_id,
                 "snoozed_until": target_dt.isoformat(),
                 "reason": reason,
+            },
+            indent=2,
+        )
+
+    @mcp.tool()
+    def unsnooze_alert(item_id: str) -> str:
+        """Remove an active snooze for a task or idea.
+
+        Args:
+            item_id: Task ID, idea ID, or 4-character prefix.
+        """
+        from marvin.daemon_schema import load_daemon_state, save_daemon_state
+
+        state = load_daemon_state(data_dir)
+        removed = state.unsnooze(item_id)
+        if removed:
+            save_daemon_state(state, data_dir)
+
+        return json.dumps(
+            {
+                "success": removed,
+                "item_id": item_id,
+                "message": f"Removed snooze for '{item_id}'" if removed else f"No active snooze found for '{item_id}'",
             },
             indent=2,
         )
@@ -990,6 +1023,303 @@ def main():
 
         state = load_daemon_state(data_dir)
         return json.dumps(state.model_dump(mode="json"), indent=2)
+
+    # ------------------------------------------------------------------
+    # Email Tools (Microsoft Graph Outlook Integration)
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    def get_email_status() -> str:
+        """Check Microsoft Graph Outlook connection and account status."""
+        from marvin.email_client import MicrosoftGraphClient, load_email_auth
+
+        client = MicrosoftGraphClient(data_dir)
+        auth = load_email_auth(data_dir)
+        if not auth:
+            return json.dumps(
+                {
+                    "authenticated": False,
+                    "message": "Not signed in. Run 'marvin email login' in terminal to authenticate.",
+                },
+                indent=2,
+            )
+
+        return json.dumps(
+            {
+                "authenticated": True,
+                "account_email": auth.account_email,
+                "account_name": auth.account_name,
+                "client_id": auth.client_id,
+                "tenant_id": auth.tenant_id,
+                "scopes": auth.scopes,
+                "is_expired": auth.is_expired(buffer_seconds=0),
+            },
+            indent=2,
+        )
+
+    @mcp.tool()
+    def list_emails(
+        limit: int = 10,
+        unread_only: bool = False,
+        folder: str = "inbox",
+        query: str | None = None,
+    ) -> str:
+        """List recent emails from Microsoft Graph Outlook with collaborator matching.
+
+        Args:
+            limit: Maximum number of emails to retrieve (default 10).
+            unread_only: If True, only retrieve unread emails.
+            folder: Mail folder name ('inbox' or 'all').
+            query: Search query to filter messages by keyword.
+        """
+        from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+        from marvin.email_triage import get_triage_candidates
+
+        client = MicrosoftGraphClient(data_dir)
+        try:
+            candidates = get_triage_candidates(
+                data_dir,
+                client,
+                limit=limit,
+                unread_only=unread_only,
+                include_triaged=True,
+            )
+            return json.dumps(
+                {
+                    "total": len(candidates),
+                    "emails": [c.to_dict() for c in candidates],
+                },
+                indent=2,
+            )
+        except NotAuthenticatedError:
+            return json.dumps(
+                {"error": "Not authenticated with Microsoft Graph. Run 'marvin email login' in CLI first."},
+                indent=2,
+            )
+        except EmailClientError as e:
+            return json.dumps({"error": str(e)}, indent=2)
+
+    @mcp.tool()
+    def get_email(email_id: str) -> str:
+        """Get full details and clean body content of an email message.
+
+        Args:
+            email_id: The ID or short prefix of the email message.
+        """
+        from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+
+        client = MicrosoftGraphClient(data_dir)
+        try:
+            try:
+                msg = client.get_message(email_id)
+            except Exception:
+                full_id = email_id
+                try:
+                    for m in client.list_messages(limit=50):
+                        if m.id.startswith(email_id) or m.short_id.startswith(email_id):
+                            full_id = m.id
+                            break
+                except Exception:
+                    pass
+                msg = client.get_message(full_id)
+            return json.dumps(
+                {
+                    "id": msg.id,
+                    "short_id": msg.short_id,
+                    "subject": msg.subject,
+                    "from": msg.sender.display() if msg.sender else None,
+                    "from_address": msg.sender.address if msg.sender else None,
+                    "to": [r.display() for r in msg.to_recipients],
+                    "cc": [r.display() for r in msg.cc_recipients],
+                    "received_at": msg.received_datetime.isoformat() if msg.received_datetime else None,
+                    "is_read": msg.is_read,
+                    "importance": msg.importance,
+                    "has_attachments": msg.has_attachments,
+                    "web_link": msg.web_link,
+                    "body": msg.clean_text_body(),
+                },
+                indent=2,
+            )
+        except NotAuthenticatedError:
+            return json.dumps(
+                {"error": "Not authenticated with Microsoft Graph. Run 'marvin email login' in CLI first."},
+                indent=2,
+            )
+        except EmailClientError as e:
+            return json.dumps({"error": str(e)}, indent=2)
+
+    @mcp.tool()
+    def triage_emails(limit: int = 10, unread_only: bool = True) -> str:
+        """Analyze unread emails against open tasks and waiting-on blockers.
+
+        Evaluates incoming messages to identify:
+        - Blocker resolutions (emails from people you are waiting on)
+        - Actionable emails with deadlines or requests
+        - Collaborator communications
+
+        Args:
+            limit: Maximum number of unread emails to inspect (default 10).
+            unread_only: If True, only evaluate unread emails.
+        """
+        from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+        from marvin.email_triage import get_triage_candidates
+
+        client = MicrosoftGraphClient(data_dir)
+        try:
+            candidates = get_triage_candidates(
+                data_dir,
+                client,
+                limit=limit,
+                unread_only=unread_only,
+                include_triaged=False,
+            )
+
+            blocker_resolutions = [c.to_dict() for c in candidates if c.waiting_tasks]
+            actionable_emails = [
+                c.to_dict()
+                for c in candidates
+                if c.suggested_action == "create_task" and not c.waiting_tasks
+            ]
+            other_emails = [
+                c.to_dict()
+                for c in candidates
+                if not c.waiting_tasks and c.suggested_action != "create_task"
+            ]
+
+            return json.dumps(
+                {
+                    "total_unread_candidates": len(candidates),
+                    "blocker_resolutions": blocker_resolutions,
+                    "suggested_tasks": actionable_emails,
+                    "other_inbox_items": other_emails,
+                },
+                indent=2,
+            )
+        except NotAuthenticatedError:
+            return json.dumps(
+                {"error": "Not authenticated with Microsoft Graph. Run 'marvin email login' in CLI first."},
+                indent=2,
+            )
+        except EmailClientError as e:
+            return json.dumps({"error": str(e)}, indent=2)
+
+    @mcp.tool()
+    def create_task_from_email(
+        email_id: str,
+        description: str | None = None,
+        deadline: str | None = None,
+        priority: str | None = None,
+        waiting_on: str | None = None,
+    ) -> str:
+        """Create a task linked to an email message and mark the email triaged.
+
+        Args:
+            email_id: ID of the email message.
+            description: Task description (defaults to email subject).
+            deadline: Optional deadline date (YYYY-MM-DD).
+            priority: Priority level ('high', 'medium', 'low').
+            waiting_on: Optional name of person waiting on.
+        """
+        from marvin.email_client import MicrosoftGraphClient
+        from marvin.email_triage import create_task_from_email as _create_task_from_email
+
+        client = MicrosoftGraphClient(data_dir)
+        try:
+            msg = client.get_message(email_id)
+            full_id = msg.id
+        except Exception:
+            full_id = email_id
+            try:
+                for m in client.list_messages(limit=50):
+                    if m.id.startswith(email_id) or m.short_id.startswith(email_id):
+                        full_id = m.id
+                        break
+            except Exception:
+                pass
+            msg = client.get_message(full_id)
+
+        task = _create_task_from_email(
+            data_dir,
+            msg,
+            description=description,
+            deadline=deadline,
+            priority=priority,
+            waiting_on=waiting_on,
+        )
+        _rebuild_index(data_dir)
+        client.mark_as_read(full_id)
+
+        return json.dumps(
+            {
+                "success": True,
+                "task": _task_to_dict(task),
+                "message": f"Created task [{task.id[:4]}] {task.description} linked to email",
+            },
+            indent=2,
+        )
+
+    @mcp.tool()
+    def resolve_email_blocker(
+        task_id: str,
+        email_id: str | None = None,
+        note: str | None = None,
+    ) -> str:
+        """Resolve a waiting-on blocker on a task using an email.
+
+        Args:
+            task_id: ID of the task to unblock.
+            email_id: Optional ID of the email that resolved the blocker.
+            note: Optional custom resolution note.
+        """
+        from marvin.email_client import MicrosoftGraphClient
+        from marvin.email_triage import resolve_email_blocker as _resolve_email_blocker
+
+        client = MicrosoftGraphClient(data_dir)
+        msg = None
+        if email_id:
+            try:
+                msg = client.get_message(email_id)
+                client.mark_as_read(msg.id)
+            except Exception:
+                full_id = email_id
+                try:
+                    for m in client.list_messages(limit=50):
+                        if m.id.startswith(email_id) or m.short_id.startswith(email_id):
+                            full_id = m.id
+                            break
+                    msg = client.get_message(full_id)
+                    client.mark_as_read(full_id)
+                except Exception:
+                    pass
+
+        task = _resolve_email_blocker(data_dir, task_id, email=msg, note=note)
+        return json.dumps(
+            {
+                "success": True,
+                "task": _task_to_dict(task),
+                "message": f"Unblocked task [{task.id[:4]}] {task.description}",
+            },
+            indent=2,
+        )
+
+    @mcp.tool()
+    def mark_email_read(email_id: str) -> str:
+        """Mark an email as read on Microsoft Graph and mark as triaged.
+
+        Args:
+            email_id: ID of the email to mark as read.
+        """
+        from marvin.email_client import MicrosoftGraphClient
+        from marvin.email_triage import dismiss_email
+
+        client = MicrosoftGraphClient(data_dir)
+        full_id = email_id
+        try:
+            client.mark_as_read(email_id)
+        except Exception:
+            pass
+        dismiss_email(data_dir, full_id)
+        return json.dumps({"success": True, "email_id": full_id}, indent=2)
 
     # ------------------------------------------------------------------
     # Resources
@@ -1027,6 +1357,20 @@ def main():
             return gemini_path.read_text()
         return "# No GEMINI.md found"
 
+    return mcp
+
+
+def main():
+    """Entry point for the marvin-mcp command."""
+    # Allow --data-dir override via argv
+    data_dir_str = _get_data_dir()
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == "--data-dir" and i < len(sys.argv) - 1:
+            data_dir_str = sys.argv[i + 1]
+            break
+
+    data_dir = Path(data_dir_str).expanduser()
+    mcp = create_mcp_server(data_dir)
     mcp.run()
 
 

@@ -32,7 +32,7 @@ def test_mcp_proactive_pings(tmp_path: Path):
 
     assert len(actionable) == 1
     assert actionable[0].item_id == "t1"
-    assert actionable[0].urgency_tier == "t_minus_24h"
+    assert actionable[0].urgency_tier == "due_today"
 
 
 def test_mcp_snooze_alert(tmp_path: Path):
@@ -50,3 +50,21 @@ def test_mcp_snooze_alert(tmp_path: Path):
     snooze = loaded.get_active_snooze("t1", now)
     assert snooze is not None
     assert snooze.reason == "Waiting for committee"
+
+
+def test_mcp_unsnooze_alert(tmp_path: Path):
+    """Test unsnooze_alert tool execution."""
+    from marvin.daemon_schema import load_daemon_state, save_daemon_state
+
+    state = load_daemon_state(tmp_path)
+    now = datetime.now()
+    state.snooze("ae23f1", now + timedelta(days=2), reason="Testing", now_dt=now)
+    save_daemon_state(state, tmp_path)
+
+    # Prefix unsnooze
+    state = load_daemon_state(tmp_path)
+    assert state.unsnooze("ae23") is True
+    save_daemon_state(state, tmp_path)
+
+    loaded = load_daemon_state(tmp_path)
+    assert loaded.get_active_snooze("ae23f1", now) is None

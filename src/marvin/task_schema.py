@@ -3,12 +3,14 @@
 Defines the JSON structure for task files and provides validation.
 """
 
+import os
+import tempfile
 import uuid
 from datetime import date
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
 def generate_task_id() -> str:
@@ -25,6 +27,7 @@ class Task(BaseModel):
     deadline: date | None = None
     deadline_time: str | None = None  # Specific time, e.g., "11:59 PM EST"
     waiting_on: str | None = None
+    waiting_since: date | None = None
     priority: Literal["high", "medium", "low"] = "medium"
     tags: list[str] = Field(default_factory=list)  # Semantic tags for filtering
     notes: list[str] = Field(default_factory=list)  # Free-text annotations
@@ -34,18 +37,28 @@ class Task(BaseModel):
     
     # Hierarchical relationships
     parent_id: str | None = None  # ID of parent task (if this is a subtask)
+
+    @model_validator(mode="after")
+    def _sync_waiting_since(self) -> "Task":
+        if self.waiting_on and self.waiting_since is None:
+            self.waiting_since = self.created_at or date.today()
+        elif not self.waiting_on:
+            self.waiting_since = None
+        return self
     
-    def is_overdue(self) -> bool:
+    def is_overdue(self, today: date | None = None) -> bool:
         """Check if task is overdue."""
         if self.status == "done" or self.deadline is None:
             return False
-        return self.deadline < date.today()
+        ref_today = today or date.today()
+        return self.deadline < ref_today
     
-    def is_due_within(self, days: int) -> bool:
+    def is_due_within(self, days: int, today: date | None = None) -> bool:
         """Check if task is due within N days."""
         if self.status == "done" or self.deadline is None:
             return False
-        delta = (self.deadline - date.today()).days
+        ref_today = today or date.today()
+        delta = (self.deadline - ref_today).days
         return 0 <= delta <= days
 
 
@@ -142,13 +155,29 @@ def load_task_file(path: Path) -> TaskFile:
 
 
 def save_task_file(task_file: TaskFile, path: Path) -> None:
-    """Save a task file to JSON.
+    """Save a task file to JSON atomically.
     
     Args:
         task_file: TaskFile to save
         path: Path to write to
     """
-    path.write_text(task_file.model_dump_json(indent=2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=path.parent,
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        temp_file.write(task_file.model_dump_json(indent=2))
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+        temp_file.close()
+        os.replace(temp_file.name, path)
+    except Exception:
+        if os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
+        raise
 
 
 def validate_json_file(path: Path) -> tuple[bool, str | None]:

@@ -1863,12 +1863,29 @@ def daemon_snooze_cmd(item_id: str, days: int, hours: int, until: str | None, re
             days = 1  # Default to 1 day
         target_dt = now + timedelta(days=days, hours=hours)
 
+    clean_arg = item_id.lower().strip()
+    canonical_id = item_id
+
+    # Resolve against known tasks
+    tf = fast_path.load_tasks(data_dir)
+    for t in tf.tasks:
+        if t.id.lower() == clean_arg or (len(clean_arg) >= 4 and t.id.lower().startswith(clean_arg)):
+            canonical_id = t.id
+            break
+    else:
+        # Resolve against known ideas
+        ideas = fast_path.load_ideas(data_dir)
+        for i in ideas.ideas:
+            if i.id.lower() == clean_arg or (len(clean_arg) >= 4 and i.id.lower().startswith(clean_arg)):
+                canonical_id = i.id
+                break
+
     state = load_daemon_state(data_dir)
-    state.snooze(item_id, target_dt, reason=reason, now_dt=now)
+    state.snooze(canonical_id, target_dt, reason=reason, now_dt=now)
     save_daemon_state(state, data_dir)
 
     styles.print_success(
-        f"Snoozed alerts for '{item_id}' until {target_dt.strftime('%Y-%m-%d %H:%M')}."
+        f"Snoozed alerts for '{canonical_id}' until {target_dt.strftime('%Y-%m-%d %H:%M')}."
     )
 
 
@@ -1889,6 +1906,24 @@ def daemon_unsnooze_cmd(item_id: str) -> None:
         styles.print_success(f"Removed snooze for '{item_id}'.")
     else:
         styles.console.print(f"[dim]No active snooze found for '{item_id}'.[/dim]")
+
+
+@daemon_group.command("start")
+@click.option("--interval", "-i", type=int, default=900, help="Check interval in seconds (default: 900 = 15m)")
+def daemon_start_cmd(interval: int) -> None:
+    """Run Always-On Marvin polling loop in foreground (for Linux/tmux/Docker)."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.daemon import MarvinDaemon
+
+    daemon = MarvinDaemon(data_dir)
+    styles.print_success(f"Starting Marvin Always-On daemon loop (interval: {interval}s). Press Ctrl+C to stop.")
+    try:
+        daemon.run_loop(interval_seconds=interval)
+    except KeyboardInterrupt:
+        styles.console.print("\n[dim]Daemon stopped.[/dim]")
 
 
 @daemon_group.command("install")
@@ -1926,6 +1961,361 @@ def daemon_uninstall_cmd() -> None:
     styles.print_success("Marvin Launchd daemon uninstalled.")
 
 
+# ---------------------------------------------------------------------------
+# Email commands (Microsoft Graph Outlook integration)
+# ---------------------------------------------------------------------------
+
+@main.group("email")
+def email_group() -> None:
+    """Manage Microsoft Graph Outlook integration.
+
+    Examples:
+      marvin email login
+      marvin email status
+      marvin email list
+      marvin email show <id>
+      marvin email triage
+      marvin email logout
+    """
+
+
+@email_group.command("login")
+@click.option("--client-id", help="Custom Azure Application (Client) ID")
+@click.option("--tenant", help="Azure tenant ID or domain (default: 'organizations')")
+@click.option("--relogin", "--force", "force", is_flag=True, help="Force re-login even if already authenticated")
+def email_login_cmd(client_id: str | None, tenant: str | None, force: bool) -> None:
+    """Log in to Microsoft 365 Outlook via OAuth2 Device Code Flow."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient, AuthenticationError, DeviceCodeExpiredError
+
+    client = MicrosoftGraphClient(data_dir, client_id=client_id, tenant=tenant)
+
+    if client.is_logged_in() and not force:
+        try:
+            tokens = client.get_valid_tokens()
+            account_str = tokens.account_email or tokens.account_name or "Unknown account"
+            styles.console.print(f"[bold green]✓ Already authenticated[/bold green] as [bold cyan]{account_str}[/bold cyan]")
+            styles.console.print("[dim]Use --relogin or --force to switch accounts or re-authenticate.[/dim]")
+            return
+        except Exception:
+            pass
+
+    styles.console.print("\n[bold blue]Initiating Microsoft 365 sign-in...[/bold blue]\n")
+    try:
+        flow = client.initiate_device_flow()
+    except AuthenticationError as e:
+        styles.print_error(str(e))
+        sys.exit(1)
+
+    verification_uri = flow.get("verification_uri", "https://microsoft.com/devicelogin")
+    user_code = flow.get("user_code", "")
+    expires_in = flow.get("expires_in", 900)
+    interval = flow.get("interval", 5)
+    device_code = flow.get("device_code", "")
+
+    styles.console.print(f"  1. Open browser:  [bold underline cyan]{verification_uri}[/bold underline cyan]")
+    styles.console.print(f"  2. Enter code:    [bold yellow]{user_code}[/bold yellow]")
+    styles.console.print(f"\n[dim]Waiting for sign-in approval (expires in {expires_in // 60} minutes)...[/dim]\n")
+
+    # Try to open browser automatically if possible
+    try:
+        import webbrowser
+        webbrowser.open(verification_uri)
+    except Exception:
+        pass
+
+    try:
+        tokens = client.poll_device_token(
+            device_code=device_code,
+            interval=interval,
+            expires_in=expires_in,
+        )
+        account_disp = tokens.account_email or tokens.account_name or "M365 User"
+        styles.console.print(f"\n[bold green]✓ Successfully signed in![/bold green]")
+        styles.console.print(f"  Account: [bold cyan]{account_disp}[/bold cyan]")
+        if tokens.account_name and tokens.account_email:
+            styles.console.print(f"  User:    [dim]{tokens.account_name}[/dim]")
+        styles.console.print("  Access:  [dim]Mail.Read (Delegated), User.Read, offline_access[/dim]\n")
+    except DeviceCodeExpiredError:
+        styles.print_error("Login timed out: device code expired. Please run 'marvin email login' again.")
+        sys.exit(1)
+    except AuthenticationError as e:
+        styles.print_error(f"Sign-in failed: {e}")
+        sys.exit(1)
+
+
+@email_group.command("status")
+def email_status_cmd() -> None:
+    """Show current Microsoft Graph authentication and account status."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient, load_email_auth
+
+    client = MicrosoftGraphClient(data_dir)
+    auth = load_email_auth(data_dir)
+
+    if not auth:
+        styles.console.print("\n[dim]Not signed in to Microsoft 365.[/dim]")
+        styles.console.print("Run [bold cyan]marvin email login[/bold cyan] to connect your Outlook account.\n")
+        return
+
+    is_expired = auth.is_expired(buffer_seconds=0)
+    has_refresh = bool(auth.refresh_token)
+
+    styles.console.print("\n[bold]Microsoft Graph Outlook Integration[/bold]")
+    account_str = auth.account_email or "Not available"
+    if auth.account_name:
+        account_str = f"{auth.account_name} <{auth.account_email}>"
+    styles.console.print(f"  Account:     [bold cyan]{account_str}[/bold cyan]")
+    styles.console.print(f"  Client ID:   [dim]{auth.client_id}[/dim]")
+    styles.console.print(f"  Tenant:      [dim]{auth.tenant_id}[/dim]")
+    styles.console.print(f"  Scopes:      [dim]{', '.join(auth.scopes)}[/dim]")
+
+    if is_expired:
+        if has_refresh:
+            styles.console.print("  Token:       [yellow]Access token expired (will auto-refresh via refresh token)[/yellow]")
+        else:
+            styles.console.print("  Token:       [bold red]Expired - run 'marvin email login'[/bold red]")
+    else:
+        from datetime import datetime
+        exp_dt = datetime.fromtimestamp(auth.expires_at).strftime("%Y-%m-%d %H:%M:%S")
+        styles.console.print(f"  Token:       [bold green]Active[/bold green] [dim](expires {exp_dt})[/dim]")
+    styles.console.print()
+
+
+@email_group.command("list")
+@click.option("--unread", "-u", is_flag=True, help="Show only unread emails")
+@click.option("--limit", "-n", type=int, default=15, help="Number of emails to list (default: 15)")
+@click.option("--days", "-d", type=int, default=None, help="Filter emails received within last N days")
+@click.option("--folder", "-f", default="inbox", help="Folder name (default: 'inbox', or 'all')")
+@click.option("--search", "-q", help="Search query string")
+@click.option("--all", "show_all", is_flag=True, help="Include previously triaged emails")
+def email_list_cmd(unread: bool, limit: int, days: int | None, folder: str, search: str | None, show_all: bool) -> None:
+    """List recent emails from Microsoft Graph Outlook with collaborator tags."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+    from marvin.email_triage import get_triage_candidates
+
+    client = MicrosoftGraphClient(data_dir)
+    try:
+        candidates = get_triage_candidates(
+            data_dir,
+            client,
+            limit=limit,
+            unread_only=unread,
+            include_triaged=show_all,
+        )
+    except NotAuthenticatedError:
+        styles.print_error("Not signed in to Microsoft 365. Run 'marvin email login' first.")
+        sys.exit(1)
+    except EmailClientError as e:
+        styles.print_error(f"Failed to fetch emails: {e}")
+        sys.exit(1)
+
+    if not candidates:
+        styles.console.print("\n[dim]No emails found matching criteria.[/dim]\n")
+        return
+
+    styles.console.print(f"\n[bold]Outlook Inbox[/bold] [dim]({len(candidates)} messages)[/dim]:\n")
+    table = styles.format_email_table(candidates)
+    styles.console.print(table)
+    styles.console.print("\n[dim]Tip: Use 'marvin email triage' to process messages or 'marvin email show <ID>' to view body.[/dim]\n")
+
+
+@email_group.command("show")
+@click.argument("message_id")
+def email_show_cmd(message_id: str) -> None:
+    """View full details and body content of an email message."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+
+    client = MicrosoftGraphClient(data_dir)
+    try:
+        try:
+            msg = client.get_message(message_id)
+        except Exception:
+            full_id = message_id
+            try:
+                for m in client.list_messages(limit=50):
+                    if m.id.startswith(message_id) or m.short_id.startswith(message_id):
+                        full_id = m.id
+                        break
+            except Exception:
+                pass
+            msg = client.get_message(full_id)
+    except NotAuthenticatedError:
+        styles.print_error("Not signed in to Microsoft 365. Run 'marvin email login' first.")
+        sys.exit(1)
+    except EmailClientError as e:
+        styles.print_error(f"Failed to fetch email: {e}")
+        sys.exit(1)
+
+    styles.console.print(f"\n[bold]{msg.subject}[/bold]")
+    if msg.sender:
+        styles.console.print(f"[dim]From:[/dim]    [cyan]{msg.sender.display()}[/cyan]")
+    if msg.to_recipients:
+        recips = ", ".join(r.display() for r in msg.to_recipients)
+        styles.console.print(f"[dim]To:[/dim]      [dim]{recips}[/dim]")
+    if msg.cc_recipients:
+        ccs = ", ".join(r.display() for r in msg.cc_recipients)
+        styles.console.print(f"[dim]Cc:[/dim]      [dim]{ccs}[/dim]")
+    if msg.received_datetime:
+        styles.console.print(f"[dim]Date:[/dim]    [dim]{styles.format_email_date(msg.received_datetime)}[/dim]")
+    if msg.has_attachments:
+        styles.console.print("[dim]Attach:[/dim]  📎 Has attachments")
+    if msg.web_link:
+        styles.console.print(f"[dim]Link:[/dim]    [dim underline]{msg.web_link}[/dim underline]")
+
+    styles.console.print("\n" + "─" * 60 + "\n")
+    body_text = msg.clean_text_body()
+    if body_text:
+        styles.console.print(body_text)
+    else:
+        styles.console.print("[dim](No message content)[/dim]")
+    styles.console.print("\n" + "─" * 60 + "\n")
+
+
+@email_group.command("triage")
+@click.option("--limit", "-n", type=int, default=10, help="Number of emails to triage (default: 10)")
+@click.option("--all", "include_all", is_flag=True, help="Include previously triaged emails")
+def email_triage_cmd(limit: int, include_all: bool) -> None:
+    """Interactive email triage: link emails to tasks, blockers, and ideas."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+    from marvin.email_triage import (
+        get_triage_candidates,
+        resolve_email_blocker,
+        create_task_from_email,
+        create_idea_from_email,
+        dismiss_email,
+    )
+
+    client = MicrosoftGraphClient(data_dir)
+    try:
+        candidates = get_triage_candidates(
+            data_dir,
+            client,
+            limit=limit,
+            unread_only=True,
+            include_triaged=include_all,
+        )
+    except NotAuthenticatedError:
+        styles.print_error("Not signed in to Microsoft 365. Run 'marvin email login' first.")
+        sys.exit(1)
+    except EmailClientError as e:
+        styles.print_error(f"Failed to fetch emails: {e}")
+        sys.exit(1)
+
+    if not candidates:
+        styles.console.print("\n[bold green]Inbox Zero![/bold green] No untriaged emails to process.\n")
+        return
+
+    styles.console.print(f"\n[bold]Starting Marvin Email Triage[/bold] [dim]({len(candidates)} candidates)[/dim]\n")
+
+    for i, candidate in enumerate(candidates, 1):
+        styles.console.print(styles.format_email_card(candidate))
+
+        prompt_str = "[bold blue][t][/bold blue] Task | "
+        if candidate.waiting_tasks:
+            prompt_str += "[bold yellow][w][/bold yellow] Unblock Blocker | "
+        else:
+            prompt_str += "[dim][w][/dim] Unblock | "
+        prompt_str += "[bold cyan][i][/bold cyan] Idea | [dim][s] Skip | [r] Mark Read | [q] Quit[/dim]\nAction: "
+
+        choice = click.prompt(prompt_str, default="s", show_default=False).strip().lower()
+
+        if choice == "q":
+            styles.console.print("\n[dim]Triage session ended.[/dim]\n")
+            break
+        elif choice == "t":
+            desc = click.prompt("Task description", default=candidate.email.subject).strip()
+            deadline_str = click.prompt("Deadline (YYYY-MM-DD, or press Enter to skip)", default="").strip() or None
+            priority = click.prompt("Priority (high/medium/low)", default="medium").strip()
+            created_task = create_task_from_email(
+                data_dir,
+                candidate.email,
+                description=desc,
+                deadline=deadline_str,
+                priority=priority,
+            )
+            styles.print_success(f"Created task [{created_task.id[:4]}] {created_task.description}")
+            dismiss_email(data_dir, candidate.email.id)
+            client.mark_as_read(candidate.email.id)
+        elif choice == "w":
+            if candidate.waiting_tasks:
+                if len(candidate.waiting_tasks) == 1:
+                    target_task_id = candidate.waiting_tasks[0]["id"]
+                else:
+                    styles.console.print("Select task to unblock:")
+                    for idx, wt in enumerate(candidate.waiting_tasks, 1):
+                        styles.console.print(f"  [{idx}] [{wt['short_id']}] {wt['description']}")
+                    sel = click.prompt("Task number", default=1, type=int)
+                    target_task_id = candidate.waiting_tasks[sel - 1]["id"]
+            else:
+                target_task_id = click.prompt("Enter task ID to unblock").strip()
+
+            note_text = click.prompt("Resolution note (optional)", default="").strip() or None
+            unblocked = resolve_email_blocker(
+                data_dir,
+                target_task_id,
+                email=candidate.email,
+                note=note_text,
+            )
+            styles.print_success(f"Unblocked task [{unblocked.id[:4]}] {unblocked.description}")
+            dismiss_email(data_dir, candidate.email.id)
+            client.mark_as_read(candidate.email.id)
+        elif choice == "i":
+            thought = click.prompt("Idea thought", default=candidate.email.subject).strip()
+            tag = click.prompt("Tag (optional)", default="email").strip() or None
+            idea = create_idea_from_email(data_dir, candidate.email, thought=thought, tag=tag)
+            styles.print_success(f"Captured idea [{idea.id[:4]}] {idea.thought}")
+            dismiss_email(data_dir, candidate.email.id)
+            client.mark_as_read(candidate.email.id)
+        elif choice == "r":
+            client.mark_as_read(candidate.email.id)
+            dismiss_email(data_dir, candidate.email.id)
+            styles.console.print("[dim]Marked as read and dismissed.[/dim]")
+        elif choice == "s":
+            dismiss_email(data_dir, candidate.email.id)
+            styles.console.print("[dim]Skipped.[/dim]")
+
+        styles.console.print()
+
+    styles.console.print("[bold green]✓ Triage complete![/bold green]\n")
+
+
+@email_group.command("logout")
+def email_logout_cmd() -> None:
+    """Disconnect and remove saved Microsoft 365 credentials."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient
+
+    client = MicrosoftGraphClient(data_dir)
+    success = client.logout()
+    if success:
+        styles.print_success("Signed out from Microsoft Graph and removed credentials.")
+    else:
+        styles.console.print("[dim]No active credentials found.[/dim]")
+
+
 if __name__ == "__main__":
     main()
+
 

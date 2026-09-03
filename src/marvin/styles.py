@@ -2,10 +2,11 @@
 
 import re
 from datetime import date, datetime, time, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from rich.console import Console, Group
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
@@ -149,6 +150,14 @@ LA_THEME = Theme({
     "idea.status.archived": "dim",
     "idea.source": "dim italic",
     "idea.warning": "bold yellow",
+    # Email colours
+    "email.subject": "bold white",
+    "email.from": "cyan",
+    "email.date": "dim",
+    "email.unread": "bold blue",
+    "email.preview": "dim",
+    "email.badge": "bold magenta",
+    "email.blocker": "bold yellow",
 })
 
 # Shared console instance
@@ -1056,3 +1065,166 @@ def format_idea_brief_section(
         result.append("  No active ideas\n", style="dim")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Email Formatting Helpers
+# ---------------------------------------------------------------------------
+
+def format_email_date(dt: datetime | None) -> str:
+    """Format an email datetime into a human-friendly short string."""
+    if not dt:
+        return ""
+    local_dt = dt.astimezone()
+    today = date.today()
+    if local_dt.date() == today:
+        return local_dt.strftime("%-I:%M %p")
+    elif local_dt.date() == today - timedelta(days=1):
+        return "Yesterday"
+    elif local_dt.year == today.year:
+        return local_dt.strftime("%b %-d")
+    else:
+        return local_dt.strftime("%Y-%m-%d")
+
+
+def format_email_table(candidates: list[Any]) -> Table:
+    """Format a list of EmailTriageCandidate or EmailMessage objects as a Rich Table."""
+    table = Table(
+        show_header=True,
+        header_style="bold blue",
+        border_style="dim blue",
+        box=None,
+        padding=(0, 1),
+    )
+    table.add_column("#", style="dim", justify="right", width=3)
+    table.add_column("ID", style="task.id", width=8)
+    table.add_column("Date", style="email.date", width=10)
+    table.add_column("From", style="email.from", min_width=20, max_width=30, no_wrap=True)
+    table.add_column("Subject", style="white", min_width=30, ratio=1)
+    table.add_column("Context / Blocker", style="dim", min_width=18)
+
+    for idx, item in enumerate(candidates, 1):
+        # Support both EmailTriageCandidate and EmailMessage
+        if hasattr(item, "email"):
+            msg = item.email
+            collab = item.collaborator
+            waiting_tasks = item.waiting_tasks
+        else:
+            msg = item
+            collab = None
+            waiting_tasks = []
+
+        # From column with collaborator info
+        from_text = Text()
+        if msg.sender:
+            if msg.sender.name and msg.sender.address and msg.sender.name != msg.sender.address:
+                from_text.append(f"{msg.sender.name} ", style="email.from")
+                from_text.append(f"<{msg.sender.address}>", style="dim")
+            else:
+                from_text.append(msg.sender.display(), style="email.from")
+        else:
+            from_text.append("(Unknown)", style="email.from")
+
+        if collab:
+            from_text.append(f" [{collab.name}]", style="bold cyan")
+
+        # Subject column with unread indicator
+        subj_text = Text()
+        if not msg.is_read:
+            subj_text.append("● ", style="email.unread")
+            subj_text.append(msg.subject, style="bold white")
+        else:
+            subj_text.append(msg.subject, style="white")
+
+        if msg.importance == "high":
+            subj_text.append(" !", style="bold red")
+        if msg.has_attachments:
+            subj_text.append(" 📎", style="dim")
+
+        # Context / Blocker column
+        context_text = Text()
+        if waiting_tasks:
+            context_text.append(f"⚠️ WAITING ({len(waiting_tasks)})", style="email.blocker")
+        elif collab:
+            context_text.append(collab.role or "Collaborator", style="dim cyan")
+        elif msg.importance == "high":
+            context_text.append("HIGH PRIORITY", style="priority.high")
+
+        table.add_row(
+            str(idx),
+            msg.short_id,
+            format_email_date(msg.received_datetime),
+            from_text,
+            subj_text,
+            context_text,
+        )
+
+    return table
+
+
+def format_email_card(candidate: Any) -> Panel:
+    """Format a single email triage candidate as a rich card panel."""
+    msg = candidate.email if hasattr(candidate, "email") else candidate
+    collab = getattr(candidate, "collaborator", None)
+    waiting_tasks = getattr(candidate, "waiting_tasks", [])
+
+    body_elements: list[Text] = []
+
+    # Subject header
+    subj_line = Text()
+    if not msg.is_read:
+        subj_line.append("● ", style="email.unread")
+    subj_line.append(msg.subject, style="bold white")
+    if msg.importance == "high":
+        subj_line.append("  [HIGH IMPORTANCE]", style="priority.high")
+    body_elements.append(subj_line)
+
+    # Sender & Date line
+    meta_line = Text()
+    meta_line.append("From: ", style="dim")
+    if msg.sender:
+        meta_line.append(msg.sender.display(), style="cyan")
+    else:
+        meta_line.append("(Unknown)", style="dim")
+
+    meta_line.append("   Date: ", style="dim")
+    meta_line.append(format_email_date(msg.received_datetime), style="dim")
+    body_elements.append(meta_line)
+
+    # Collaborator info
+    if collab:
+        collab_line = Text()
+        collab_line.append("Collaborator: ", style="dim")
+        collab_line.append(collab.name, style="bold cyan")
+        if collab.role:
+            collab_line.append(f" ({collab.role})", style="yellow")
+        if collab.affiliation:
+            collab_line.append(f" - {collab.affiliation}", style="dim")
+        body_elements.append(collab_line)
+
+    # Blocker alerts
+    if waiting_tasks:
+        blocker_line = Text()
+        blocker_line.append("⚠️  You have tasks waiting on this person:", style="email.blocker")
+        body_elements.append(blocker_line)
+        for t in waiting_tasks:
+            t_line = Text()
+            t_id = t.get("short_id") or t.get("id", "")[:4]
+            t_line.append(f"   • [{t_id}] ", style="task.id")
+            t_line.append(t.get("description", ""), style="white")
+            if t.get("deadline"):
+                t_line.append(f" (due {t['deadline']})", style="yellow")
+            body_elements.append(t_line)
+
+    # Body Preview snippet
+    preview = msg.body_preview or msg.clean_text_body()[:300]
+    if preview:
+        body_elements.append(Text())
+        body_text = Text()
+        body_text.append(preview[:400] + ("..." if len(preview) > 400 else ""), style="dim italic")
+        body_elements.append(body_text)
+
+    group = Group(*body_elements)
+    border_style = "yellow" if waiting_tasks else "blue"
+    return Panel(group, title=f"Email [{msg.short_id}]", border_style=border_style, padding=(1, 2))
+

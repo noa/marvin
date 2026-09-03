@@ -86,7 +86,7 @@ def test_eval_deadlines():
     # Verify due today alert
     today_alerts = [a for a in alerts if a.item_id == "today1"]
     assert len(today_alerts) == 1
-    assert today_alerts[0].urgency_tier == "t_minus_24h"
+    assert today_alerts[0].urgency_tier == "due_today"
     assert "due TODAY" in today_alerts[0].narrative
 
     # Verify parent task with subtask bottleneck
@@ -95,6 +95,63 @@ def test_eval_deadlines():
     assert parent_alerts[0].category == "subtask_bottleneck"
     assert "1 subtasks remaining open" in parent_alerts[0].narrative
     assert "blocked on collaborators" in parent_alerts[0].narrative
+
+
+def test_eval_blockers_with_waiting_since():
+    """Test that waiting_since overrides task creation date for blocker duration."""
+    today = date(2026, 9, 10)
+    now = datetime(2026, 9, 10, 10, 0)
+
+    c_alice = Collaborator(name="Alice Chen", role="PhD student")  # 4-day threshold
+    cf = CollaboratorFile(collaborators=[c_alice])
+
+    # Task created 30 days ago, but only marked waiting 2 days ago -> should NOT trigger (2 < 4)
+    t1 = Task(
+        id="t001",
+        description="Review Alice's draft",
+        waiting_on="Alice Chen",
+        created_at=date(2026, 8, 11),  # 30 days ago
+        waiting_since=date(2026, 9, 8),  # 2 days ago
+        status="open",
+    )
+
+    tf = TaskFile(project="test", tasks=[t1])
+    alerts = _eval_blockers(tf, cf, today, now)
+    assert len(alerts) == 0
+
+    # Task marked waiting 5 days ago -> should trigger (5 >= 4)
+    t1.waiting_since = date(2026, 9, 5)
+    alerts2 = _eval_blockers(tf, cf, today, now)
+    assert len(alerts2) == 1
+    assert "for 5 days" in alerts2[0].narrative
+
+
+def test_evaluate_knowledge_state_batch_rate_limiting(tmp_path: Path):
+    """Test that batch evaluation does not exceed max_daily_pings for non-critical alerts."""
+    now = datetime(2026, 9, 1, 14, 0)
+    today = now.date()
+
+    # 5 tasks due in 7 days (non-critical, tier='t_minus_7d')
+    tasks = [
+        Task(id=f"t{i}", description=f"Task {i}", deadline=today + timedelta(days=7), priority="medium")
+        for i in range(5)
+    ]
+    save_task_file(TaskFile(project="p1", tasks=tasks), tmp_path / "tasks.json")
+    save_collaborator_file(CollaboratorFile(), tmp_path / "collaborators.json")
+    save_idea_file(IdeaFile(), tmp_path / "ideas.json")
+
+    daemon_state = DaemonState()
+    daemon_state.quiet_hours.enabled = False
+    daemon_state.rate_limits.max_daily_pings = 2
+    save_daemon_state(daemon_state, tmp_path)
+
+    actionable, squelched = evaluate_knowledge_state(tmp_path, now_dt=now, bypass_filters=False)
+
+    # Exactly 2 should be actionable, 3 should be squelched by daily rate limit
+    assert len(actionable) == 2
+    assert len(squelched) == 3
+    for _, reason in squelched:
+        assert reason == "daily_rate_limit_reached"
 
 
 def test_eval_blockers_with_roles():

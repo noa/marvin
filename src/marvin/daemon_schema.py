@@ -4,11 +4,26 @@ Defines Pydantic models for daemon_state.json, including quiet hours,
 daily rate limits, snooze tracking, and notification cooldown history.
 """
 
+import os
+import tempfile
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+MAX_HISTORY_ENTRIES = 100
+
+
+def _ids_match(id1: str, id2: str) -> bool:
+    """Check if two IDs match exactly or as a prefix of length >= 4."""
+    c1 = id1.lower().strip()
+    c2 = id2.lower().strip()
+    if c1 == c2:
+        return True
+    if len(c1) >= 4 and len(c2) >= 4:
+        return c1.startswith(c2) or c2.startswith(c1)
+    return False
 
 
 def _parse_time_str(t_str: str) -> time:
@@ -103,6 +118,9 @@ class DaemonState(BaseModel):
         record = self.snoozes.get(clean_id)
         if record and record.is_active(now_dt):
             return record
+        for key, rec in self.snoozes.items():
+            if _ids_match(clean_id, key) and rec.is_active(now_dt):
+                return rec
         return None
 
     def snooze(
@@ -122,10 +140,15 @@ class DaemonState(BaseModel):
         )
 
     def unsnooze(self, item_id: str) -> bool:
-        """Remove a snooze for an item. Returns True if was snoozed."""
+        """Remove a snooze for an item (supports prefix matching). Returns True if was snoozed."""
         clean_id = item_id.lower().strip()
-        if clean_id in self.snoozes:
-            del self.snoozes[clean_id]
+        matching_keys = [
+            k for k in self.snoozes
+            if _ids_match(clean_id, k)
+        ]
+        if matching_keys:
+            for k in matching_keys:
+                del self.snoozes[k]
             return True
         return False
 
@@ -145,7 +168,7 @@ class DaemonState(BaseModel):
         now = now_dt or datetime.now()
 
         # 1. Check quiet hours (unless critical urgency)
-        is_critical = urgency_tier in ("t_minus_2h", "t_minus_24h", "urgent_deadline")
+        is_critical = urgency_tier in ("due_today", "overdue", "t_minus_24h", "urgent_deadline", "t_minus_2h")
         if not is_critical and self.quiet_hours.is_quiet(now):
             return False, "quiet_hours"
 
@@ -173,7 +196,7 @@ class DaemonState(BaseModel):
 
         clean_id = item_id.lower().strip()
         recent_pings = [
-            h for h in self.history if h.item_id.lower().strip() == clean_id
+            h for h in self.history if _ids_match(clean_id, h.item_id)
         ]
         if recent_pings:
             last_ping = max(recent_pings, key=lambda x: x.pinged_at)
@@ -213,6 +236,8 @@ class DaemonState(BaseModel):
                 reason=reason,
             )
         )
+        if len(self.history) > MAX_HISTORY_ENTRIES:
+            self.history = self.history[-MAX_HISTORY_ENTRIES:]
 
 
 def get_daemon_state_path(data_dir: Path) -> Path:
@@ -235,6 +260,22 @@ def load_daemon_state(data_dir: Path) -> DaemonState:
 
 
 def save_daemon_state(state: DaemonState, data_dir: Path) -> None:
-    """Save daemon_state.json to data_dir."""
+    """Save daemon_state.json to data_dir atomically."""
+    data_dir.mkdir(parents=True, exist_ok=True)
     path = get_daemon_state_path(data_dir)
-    path.write_text(state.model_dump_json(indent=2))
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=data_dir,
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        temp_file.write(state.model_dump_json(indent=2))
+        temp_file.flush()
+        os.fsync(temp_file.fileno())
+        temp_file.close()
+        os.replace(temp_file.name, path)
+    except Exception:
+        if os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
+        raise

@@ -428,9 +428,11 @@ def edit_task(
     
     if set_waiting:
         task.waiting_on = set_waiting
+        task.waiting_since = date.today()
     
     if clear_waiting:
         task.waiting_on = None
+        task.waiting_since = None
     
     if set_description:
         task.description = set_description

@@ -52,6 +52,9 @@ class MarvinDaemon:
             (actionable_alerts, squelched_alerts_with_reasons)
         """
         now = now_dt or datetime.now()
+        if not dry_run:
+            fast_path.run_idea_decay(self.data_dir)
+
         actionable, squelched = evaluate_knowledge_state(
             self.data_dir,
             now_dt=now,
@@ -97,17 +100,22 @@ class MarvinDaemon:
         """Compute counts and return single-line status string."""
         tf = fast_path.load_tasks(self.data_dir)
         ideas = fast_path.load_ideas(self.data_dir)
+        state = load_daemon_state(self.data_dir)
 
         from datetime import date as _date
         today = _date.today()
+        now_dt = datetime.now()
 
-        overdue_count = sum(1 for t in tf.open_tasks if t.is_overdue())
-        due_today_count = sum(1 for t in tf.open_tasks if t.deadline == today)
-        blocker_count = sum(1 for t in tf.open_tasks if t.waiting_on)
+        def is_snoozed(item_id: str) -> bool:
+            return state.get_active_snooze(item_id, now_dt) is not None
+
+        overdue_count = sum(1 for t in tf.open_tasks if t.is_overdue(today=today) and not is_snoozed(t.id))
+        due_today_count = sum(1 for t in tf.open_tasks if t.deadline == today and not is_snoozed(t.id))
+        blocker_count = sum(1 for t in tf.open_tasks if t.waiting_on and not is_snoozed(t.id))
 
         expiring_ideas_count = 0
         for idea in ideas.ideas:
-            if idea.status in ("spark", "developing"):
+            if idea.status in ("spark", "developing") and not is_snoozed(idea.id):
                 left = idea.days_until_archive(today)
                 if left is not None and left <= 5:
                     expiring_ideas_count += 1
