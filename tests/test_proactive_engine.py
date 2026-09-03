@@ -2,6 +2,7 @@
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -9,10 +10,12 @@ from marvin.task_schema import Task, TaskFile, save_task_file
 from marvin.collaborator_schema import Collaborator, CollaboratorFile, save_collaborator_file
 from marvin.idea_schema import Idea, IdeaFile, save_idea_file
 from marvin.daemon_schema import DaemonState, save_daemon_state
+from marvin.email_schema import EmailAddress, EmailMessage, EmailState, save_email_state
 from marvin.proactive_engine import (
     _eval_deadlines,
     _eval_blockers,
     _eval_ideas,
+    _eval_emails,
     evaluate_knowledge_state,
 )
 
@@ -271,3 +274,183 @@ def test_evaluate_knowledge_state_e2e(tmp_path: Path):
     actionable_bypass, squelched_bypass = evaluate_knowledge_state(tmp_path, now_dt=now, bypass_filters=True)
     assert len(actionable_bypass) == 1
     assert actionable_bypass[0].item_id == "t01"
+
+
+def test_eval_emails_simple_blocker(tmp_path: Path):
+    """Test simple blocker resolution alert when a collaborator replies."""
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 0)
+
+    # Collaborator Alice
+    c1 = Collaborator(id="collab1", name="Alice Chen", email="alice@mit.edu")
+    save_collaborator_file(CollaboratorFile(collaborators=[c1]), tmp_path / "collaborators.json")
+
+    # Task waiting on Alice
+    t1 = Task(id="t01", description="Review NeurIPS draft", waiting_on="Alice Chen", priority="high")
+    save_task_file(TaskFile(project="p1", tasks=[t1]), tmp_path / "tasks.json")
+
+    # Unread email from Alice
+    mock_msg = EmailMessage(
+        id="email_101",
+        subject="Re: NeurIPS draft comments attached",
+        sender=EmailAddress(name="Alice Chen", address="alice@mit.edu"),
+        body_preview="Here are my suggested edits to Section 3.",
+        importance="normal",
+        is_read=False,
+    )
+    mock_client = MagicMock()
+    mock_client.list_messages.return_value = [mock_msg]
+
+    alerts, untriaged = _eval_emails(tmp_path, today, now, client=mock_client)
+
+    assert untriaged == 1
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.category == "blocker"
+    assert alert.urgency_tier == "urgent_blocker_reply"
+    assert alert.item_id == "t01"
+    assert "Alice Chen replied:" in alert.title
+    assert any(act.action_type == "unblock" for act in alert.actions)
+
+
+def test_eval_emails_ambiguous_blocker(tmp_path: Path):
+    """Test that multiple waiting tasks on same collaborator escalate to Tier 2 triage."""
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 0)
+
+    c1 = Collaborator(id="collab1", name="Alice Chen", email="alice@mit.edu")
+    save_collaborator_file(CollaboratorFile(collaborators=[c1]), tmp_path / "collaborators.json")
+
+    # Two tasks waiting on Alice
+    t1 = Task(id="t01", description="Review paper draft", waiting_on="Alice")
+    t2 = Task(id="t02", description="Send code repository", waiting_on="Alice")
+    save_task_file(TaskFile(project="p1", tasks=[t1, t2]), tmp_path / "tasks.json")
+
+    mock_msg = EmailMessage(
+        id="email_202",
+        subject="Hey Nick, quick update",
+        sender=EmailAddress(name="Alice Chen", address="alice@mit.edu"),
+        body_preview="I finished my part and pushed it.",
+        is_read=False,
+    )
+    mock_client = MagicMock()
+    mock_client.list_messages.return_value = [mock_msg]
+
+    alerts, untriaged = _eval_emails(tmp_path, today, now, client=mock_client)
+
+    assert untriaged == 1
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.category == "triage"
+    assert alert.urgency_tier == "ambiguous_blocker_reply"
+    assert alert.item_id == "email_202"
+    assert "Triage Needed:" in alert.title
+    assert any(act.action_type == "agent_triage" for act in alert.actions)
+
+
+def test_eval_emails_urgent_keywords(tmp_path: Path):
+    """Test detection of high-priority action emails (grants, deadlines)."""
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 0)
+
+    save_collaborator_file(CollaboratorFile(), tmp_path / "collaborators.json")
+    save_task_file(TaskFile(project="p1", tasks=[]), tmp_path / "tasks.json")
+
+    mock_msg = EmailMessage(
+        id="email_303",
+        subject="Action Required: NIH annual progress report deadline",
+        sender=EmailAddress(name="NIH Program Officer", address="po@nih.gov"),
+        body_preview="Please submit the RPPR before next Friday.",
+        importance="high",
+        is_read=False,
+    )
+    mock_client = MagicMock()
+    mock_client.list_messages.return_value = [mock_msg]
+
+    alerts, untriaged = _eval_emails(tmp_path, today, now, client=mock_client)
+
+    assert untriaged == 1
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.category == "triage"
+    assert alert.urgency_tier == "urgent_email_action"
+    assert "Action Email:" in alert.title
+    assert any(act.action_type == "create_task" for act in alert.actions)
+    assert any(act.action_type == "agent_triage" for act in alert.actions)
+
+
+def test_eval_emails_routine_filtering(tmp_path: Path):
+    """Test that routine emails do not spam proactive notifications but count toward untriaged."""
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 0)
+
+    save_collaborator_file(CollaboratorFile(), tmp_path / "collaborators.json")
+    save_task_file(TaskFile(project="p1", tasks=[]), tmp_path / "tasks.json")
+
+    mock_msg = EmailMessage(
+        id="email_404",
+        subject="ACM TechNews - Wednesday Digest",
+        sender=EmailAddress(name="ACM", address="technews@acm.org"),
+        body_preview="Here are today's top computing headlines.",
+        is_read=False,
+    )
+    mock_client = MagicMock()
+    mock_client.list_messages.return_value = [mock_msg]
+
+    alerts, untriaged = _eval_emails(tmp_path, today, now, client=mock_client)
+
+    # Routine message should NOT generate an alert
+    assert len(alerts) == 0
+    # But it SHOULD be counted toward untriaged count for ambient status
+    assert untriaged == 1
+
+
+def test_eval_emails_offline_graceful_degradation(tmp_path: Path):
+    """Test that unauthenticated or network error returns empty alerts gracefully."""
+    today = date(2026, 9, 1)
+    now = datetime(2026, 9, 1, 14, 0)
+
+    # 1. Unauthenticated (no email_auth.json)
+    alerts, untriaged = _eval_emails(tmp_path, today, now, client=None)
+    assert alerts == []
+    assert untriaged == 0
+
+    # 2. Client raises network exception
+    mock_client = MagicMock()
+    mock_client.list_messages.side_effect = RuntimeError("Network down / Wi-Fi disconnected")
+    alerts_err, untriaged_err = _eval_emails(tmp_path, today, now, client=mock_client)
+    assert alerts_err == []
+    assert untriaged_err == 0
+
+
+def test_evaluate_knowledge_state_with_emails(tmp_path: Path):
+    """Test evaluate_knowledge_state integration with mocked email client."""
+    now = datetime(2026, 9, 1, 14, 0)
+    today = now.date()
+
+    c1 = Collaborator(id="collab1", name="Alice Chen", email="alice@mit.edu")
+    save_collaborator_file(CollaboratorFile(collaborators=[c1]), tmp_path / "collaborators.json")
+
+    t1 = Task(id="t01", description="Review draft", waiting_on="Alice Chen")
+    save_task_file(TaskFile(project="p1", tasks=[t1]), tmp_path / "tasks.json")
+    save_idea_file(IdeaFile(), tmp_path / "ideas.json")
+
+    mock_msg = EmailMessage(
+        id="email_505",
+        subject="Re: Review draft feedback",
+        sender=EmailAddress(name="Alice Chen", address="alice@mit.edu"),
+        is_read=False,
+    )
+    mock_client = MagicMock()
+    mock_client.list_messages.return_value = [mock_msg]
+
+    actionable, squelched = evaluate_knowledge_state(
+        tmp_path,
+        now_dt=now,
+        email_client=mock_client,
+    )
+
+    assert len(actionable) >= 1
+    email_alert = next((a for a in actionable if "Alice Chen replied" in a.title), None)
+    assert email_alert is not None
+    assert email_alert.category == "blocker"

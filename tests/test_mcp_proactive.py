@@ -68,3 +68,38 @@ def test_mcp_unsnooze_alert(tmp_path: Path):
 
     loaded = load_daemon_state(tmp_path)
     assert loaded.get_active_snooze("ae23f1", now) is None
+
+
+def test_mcp_proactive_pings_with_email(tmp_path: Path):
+    """Test get_proactive_pings includes email blocker alerts."""
+    from marvin.email_schema import EmailAddress, EmailMessage
+    from unittest.mock import MagicMock
+    from marvin.daemon import MarvinDaemon
+
+    c_file = CollaboratorFile(collaborators=[])
+    save_collaborator_file(c_file, tmp_path / "collaborators.json")
+    save_idea_file(IdeaFile(), tmp_path / "ideas.json")
+    save_task_file(TaskFile(project="default", tasks=[]), tmp_path / "tasks.json")
+
+    mock_msg = EmailMessage(
+        id="msg-mcp-1",
+        subject="Action Required: Review NIH proposal",
+        sender=EmailAddress(name="Sponsor", address="sponsor@nih.gov"),
+        importance="high",
+        is_read=False,
+    )
+    mock_client = MagicMock()
+    mock_client.list_messages.return_value = [mock_msg]
+
+    daemon = MarvinDaemon(tmp_path)
+    actionable, _ = daemon.run_once(
+        notify=False,
+        dry_run=True,
+        bypass_filters=True,
+        email_client=mock_client,
+    )
+
+    assert len(actionable) == 1
+    assert actionable[0].item_id == "msg-mcp-1"
+    assert actionable[0].category == "triage"
+    assert actionable[0].item_type == "email"

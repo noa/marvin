@@ -51,20 +51,35 @@ def test_status_ambient_with_tasks(runner, cli_env):
     )
     save_task_file(tf, cli_env / "tasks.json")
 
+    # Also set untriaged_emails_count in daemon_state
+    from marvin.daemon_schema import load_daemon_state, save_daemon_state
+    ds = load_daemon_state(cli_env)
+    ds.untriaged_emails_count = 3
+    save_daemon_state(ds, cli_env)
+
     res = runner.invoke(main, ["status", "--ambient"])
     assert res.exit_code == 0
     assert "1 overdue" in res.output
     assert "1 due today" in res.output
     assert "1 waiting" in res.output
+    assert "3 untriaged" in res.output
+    assert "✉" in res.output
 
 
 def test_daemon_status_command(runner, cli_env):
     """Test marvin daemon status output."""
+    from marvin.daemon_schema import load_daemon_state, save_daemon_state
+    ds = load_daemon_state(cli_env)
+    ds.untriaged_emails_count = 2
+    save_daemon_state(ds, cli_env)
+
     res = runner.invoke(main, ["daemon", "status"])
     assert res.exit_code == 0
     assert "Daemon Configuration" in res.output
     assert "Quiet Hours" in res.output
     assert "Max Daily Pings" in res.output
+    assert "Email Cooldown" in res.output
+    assert "Untriaged Emails" in res.output
 
 
 def test_daemon_run_once_dry_run(runner, cli_env):
@@ -139,3 +154,12 @@ def test_daemon_install_and_uninstall(runner, cli_env):
         assert res_uninstall.exit_code == 0
         assert "Launchd daemon uninstalled" in res_uninstall.output
         assert not fake_plist.exists()
+
+
+def test_daemon_run_once_agent_flag(runner, cli_env):
+    """Test daemon run-once passes --agent flag."""
+    with patch("marvin.daemon.MarvinDaemon.run_once", return_value=([], [])) as mock_run_once:
+        res = runner.invoke(main, ["daemon", "run-once", "--agent", "--no-console", "--no-macos"])
+        assert res.exit_code == 0
+        mock_run_once.assert_called_once()
+        assert mock_run_once.call_args[1]["enable_agent"] is True

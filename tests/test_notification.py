@@ -27,18 +27,21 @@ def test_ambient_status_formatting():
     assert "all clear" in clear_msg
     assert "✓" in clear_msg
 
-    # Active items
+    # Active items with untriaged emails
     status_msg = AmbientStatusFormatter.format_status(
         due_today_count=2,
         overdue_count=1,
         blocker_count=3,
         expiring_ideas_count=1,
+        untriaged_emails_count=4,
         use_emojis=True,
     )
     assert "1 overdue" in status_msg
     assert "2 due today" in status_msg
     assert "3 waiting" in status_msg
     assert "1 expiring ideas" in status_msg
+    assert "4 untriaged" in status_msg
+    assert "✉" in status_msg
 
     # Without emojis
     no_emoji_msg = AmbientStatusFormatter.format_status(
@@ -46,10 +49,13 @@ def test_ambient_status_formatting():
         overdue_count=0,
         blocker_count=0,
         expiring_ideas_count=0,
+        untriaged_emails_count=2,
         use_emojis=False,
     )
     assert "⏳" not in no_emoji_msg
+    assert "✉" not in no_emoji_msg
     assert "1 due today" in no_emoji_msg
+    assert "2 untriaged" in no_emoji_msg
 
 
 def test_console_hud_notifier_rendering():

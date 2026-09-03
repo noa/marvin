@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from marvin import fast_path
 from marvin.daemon_schema import (
@@ -38,6 +38,9 @@ class MarvinDaemon:
         bypass_filters: bool = False,
         channels: list[Literal["macos", "console"]] | None = None,
         now_dt: datetime | None = None,
+        include_email: bool = True,
+        enable_agent: bool = False,
+        email_client: Any | None = None,
     ) -> tuple[list[ProactiveAlert], list[tuple[ProactiveAlert, str]]]:
         """Execute a single proactive evaluation pass.
 
@@ -47,6 +50,9 @@ class MarvinDaemon:
             bypass_filters: If True, bypass quiet hours and rate limits.
             channels: Channels to notify ("macos", "console").
             now_dt: Reference time (defaults to now).
+            include_email: Whether to evaluate unread Outlook emails.
+            enable_agent: Whether to trigger Tier 2 agentic escalation for complex triage.
+            email_client: Injected email client for testing/offline.
 
         Returns:
             (actionable_alerts, squelched_alerts_with_reasons)
@@ -59,7 +65,34 @@ class MarvinDaemon:
             self.data_dir,
             now_dt=now,
             bypass_filters=bypass_filters,
+            include_email=include_email,
+            email_client=email_client,
         )
+
+        # Tier 2: Conditional Agentic Escalation
+        if enable_agent and not dry_run:
+            from marvin.email_triage import run_agentic_email_triage
+
+            escalated_any = False
+            for alert in list(actionable):
+                if any(act.action_type == "agent_triage" for act in alert.actions):
+                    res = run_agentic_email_triage(
+                        self.data_dir,
+                        email_id=alert.item_id,
+                        client=email_client,
+                    )
+                    if res.get("status") == "success":
+                        escalated_any = True
+
+            if escalated_any:
+                # Refresh evaluation after agent changes
+                actionable, squelched = evaluate_knowledge_state(
+                    self.data_dir,
+                    now_dt=now,
+                    bypass_filters=bypass_filters,
+                    include_email=include_email,
+                    email_client=email_client,
+                )
 
         if actionable and not dry_run:
             state = load_daemon_state(self.data_dir)
@@ -120,11 +153,14 @@ class MarvinDaemon:
                 if left is not None and left <= 5:
                     expiring_ideas_count += 1
 
+        untriaged_emails_count = state.untriaged_emails_count
+
         return AmbientStatusFormatter.format_status(
             due_today_count=due_today_count,
             overdue_count=overdue_count,
             blocker_count=blocker_count,
             expiring_ideas_count=expiring_ideas_count,
+            untriaged_emails_count=untriaged_emails_count,
             use_emojis=use_emojis,
         )
 

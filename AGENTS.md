@@ -140,6 +140,7 @@ marvin email show 1a2b3c4d         # View full email content and body
 # Email management & triage
 marvin email login                 # Sign in via M365 Device Code flow
 marvin email triage                # Interactive email triage (task/unblock/idea)
+marvin email agent-triage          # Autonomous Tier 2 agentic triage (Gemini/NLU)
 marvin email logout                # Disconnect Microsoft account
 
 # Task creation
@@ -211,10 +212,12 @@ marvin ideas link ae23 --person bob  # Link to person
 | Ambient shell status    | `marvin status --ambient`                  |
 | Daemon status & snoozes | `marvin daemon status`                     |
 | Evaluate & ping alerts  | `marvin daemon run-once`                   |
+| Daemon with agent triage| `marvin daemon run-once --agent`           |
 | Snooze alert            | `marvin daemon snooze ID --days 2`         |
 | Email login             | `marvin email login`                       |
 | Email list              | `marvin email list --unread`               |
-| Email triage            | `marvin email triage`                      |
+| Email triage (manual)   | `marvin email triage`                      |
+| Email agent triage      | `marvin email agent-triage`                |
 | Email status            | `marvin email status`                      |
 
 ## Important conventions

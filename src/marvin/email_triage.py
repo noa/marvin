@@ -1,6 +1,9 @@
 """Triage engine connecting Microsoft Graph emails with Marvin tasks and collaborators."""
 
+import json
 import re
+import shutil
+import subprocess
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -171,6 +174,7 @@ def get_triage_candidates(
                 "description": t.description,
                 "waiting_on": t.waiting_on,
                 "deadline": t.deadline.isoformat() if t.deadline else None,
+                "priority": t.priority,
             }
             for t in waiting_tasks
         ]
@@ -323,3 +327,171 @@ def dismiss_email(data_dir: Path, email_id: str) -> None:
     state = load_email_state(data_dir)
     state.mark_triaged(email_id)
     save_email_state(state, data_dir)
+
+
+def run_agentic_email_triage(
+    data_dir: Path,
+    email_id: str | None = None,
+    candidate: EmailTriageCandidate | None = None,
+    client: MicrosoftGraphClient | None = None,
+) -> dict[str, Any]:
+    """Execute Tier 2 Agentic Escalation on a complex/ambiguous email.
+
+    Analyzes message body, cross-references collaborators and open tasks,
+    invokes Gemini CLI (or MCP agent), and executes triage actions.
+    """
+    if candidate is None:
+        if not email_id:
+            raise ValueError("Either candidate or email_id must be provided")
+        graph_client = client or MicrosoftGraphClient(data_dir)
+        msg = graph_client.get_message(email_id)
+        collab_file = fast_path.load_collaborators(data_dir)
+        task_file = fast_path.load_tasks(data_dir)
+        sender_name = msg.sender.name if msg.sender else None
+        sender_email = msg.sender.address if msg.sender else None
+        collab = find_matching_collaborator(sender_name, sender_email, collab_file)
+        waiting = find_tasks_waiting_on_sender(sender_name, sender_email, collab, task_file)
+        candidate = EmailTriageCandidate(
+            email=msg,
+            collaborator=collab,
+            waiting_tasks=[
+                {
+                    "id": t.id,
+                    "short_id": t.id[:4],
+                    "description": t.description,
+                    "waiting_on": t.waiting_on,
+                    "deadline": t.deadline.isoformat() if t.deadline else None,
+                }
+                for t in waiting
+            ],
+        )
+
+    email = candidate.email
+    body_text = email.clean_text_body()[:2000]
+    sender_str = email.sender.display() if email.sender else "unknown"
+    collab_str = (
+        f"{candidate.collaborator.name} ({candidate.collaborator.role or 'collaborator'})"
+        if candidate.collaborator
+        else "Unknown"
+    )
+
+    waiting_lines = [
+        f"- Task [{t['short_id']}] '{t['description']}' (waiting on {t.get('waiting_on')})"
+        for t in candidate.waiting_tasks
+    ]
+    waiting_str = "\n".join(waiting_lines) if waiting_lines else "None"
+
+    prompt = f"""You are Marvin's autonomous email triage agent. An email requires NLU reasoning to resolve tasks and blockers.
+
+Sender: {sender_str}
+Matched Collaborator: {collab_str}
+Subject: {email.subject}
+Message Content:
+\"\"\"{body_text}\"\"\"
+
+Open Waiting Tasks:
+{waiting_str}
+
+Analyze the email and decide on the best triage action(s).
+Output ONLY valid JSON matching this schema:
+{{
+  "thought": "brief reasoning explaining why this action was chosen",
+  "actions": [
+    {{
+      "type": "unblock_task" | "create_task" | "add_note" | "dismiss",
+      "task_id": "task_id_or_prefix",
+      "note": "resolution or progress note",
+      "description": "new task description",
+      "deadline": "YYYY-MM-DD",
+      "priority": "high" | "medium" | "low"
+    }}
+  ]
+}}
+"""
+
+    if not shutil.which("gemini"):
+        return {
+            "status": "manual_needed",
+            "reason": "gemini_cli_not_found",
+            "message": "Gemini CLI not found. Please triage manually via 'marvin email triage'.",
+            "email_id": email.id,
+            "candidate": candidate.to_dict(),
+        }
+
+    try:
+        proc = subprocess.run(
+            ["gemini", prompt],
+            cwd=data_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            return {
+                "status": "error",
+                "error": f"Gemini CLI exited with code {proc.returncode}: {proc.stderr}",
+                "email_id": email.id,
+            }
+
+        output = proc.stdout.strip()
+        match = re.search(r"\{.*\}", output, re.DOTALL)
+        if not match:
+            return {
+                "status": "error",
+                "error": f"Could not parse JSON from Gemini output: {output[:200]}",
+                "email_id": email.id,
+            }
+
+        parsed = json.loads(match.group(0))
+        actions_taken = []
+
+        for act in parsed.get("actions", []):
+            act_type = act.get("type")
+            if act_type == "unblock_task":
+                tid = act.get("task_id")
+                if tid:
+                    resolve_email_blocker(
+                        data_dir,
+                        tid,
+                        email=email,
+                        note=act.get("note"),
+                    )
+                    actions_taken.append(f"Unblocked task {tid}")
+            elif act_type == "create_task":
+                created = create_task_from_email(
+                    data_dir,
+                    email,
+                    description=act.get("description"),
+                    deadline=act.get("deadline"),
+                    priority=act.get("priority"),
+                )
+                actions_taken.append(f"Created task [{created.id[:4]}] {created.description}")
+            elif act_type == "add_note":
+                tid = act.get("task_id")
+                note_text = act.get("note") or f"Update from email '{email.subject}'"
+                if tid:
+                    fast_path.add_note(data_dir, tid, note_text)
+                    actions_taken.append(f"Added note to task {tid}")
+            elif act_type == "dismiss":
+                dismiss_email(data_dir, email.id)
+                actions_taken.append("Dismissed email")
+
+        return {
+            "status": "success",
+            "email_id": email.id,
+            "thought": parsed.get("thought", ""),
+            "actions_taken": actions_taken,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "error": "Gemini CLI execution timed out after 60 seconds",
+            "email_id": email.id,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "email_id": email.id,
+        }

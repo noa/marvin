@@ -65,13 +65,14 @@ class RateLimitConfig(BaseModel):
     task_cooldown_hours: int = 48
     idea_cooldown_hours: int = 72
     collaborator_cooldown_hours: int = 48
+    email_cooldown_hours: int = 24
 
 
 class NotificationRecord(BaseModel):
     """Record of a sent notification."""
 
     item_id: str
-    item_type: Literal["task", "idea", "collaborator", "general"]
+    item_type: Literal["task", "idea", "collaborator", "email", "general"]
     pinged_at: datetime
     urgency_tier: str
     reason: str
@@ -98,6 +99,7 @@ class DaemonState(BaseModel):
     last_eval_timestamp: datetime | None = None
     notifications_sent_today: int = 0
     last_ping_date: date | None = None
+    untriaged_emails_count: int = 0
     quiet_hours: QuietHoursConfig = Field(default_factory=QuietHoursConfig)
     rate_limits: RateLimitConfig = Field(default_factory=RateLimitConfig)
     history: list[NotificationRecord] = Field(default_factory=list)
@@ -155,7 +157,7 @@ class DaemonState(BaseModel):
     def can_ping_item(
         self,
         item_id: str,
-        item_type: Literal["task", "idea", "collaborator", "general"],
+        item_type: Literal["task", "idea", "collaborator", "email", "general"],
         urgency_tier: str,
         now_dt: datetime | None = None,
         bypass_rate_limit: bool = False,
@@ -168,7 +170,14 @@ class DaemonState(BaseModel):
         now = now_dt or datetime.now()
 
         # 1. Check quiet hours (unless critical urgency)
-        is_critical = urgency_tier in ("due_today", "overdue", "t_minus_24h", "urgent_deadline", "t_minus_2h")
+        is_critical = urgency_tier in (
+            "due_today",
+            "overdue",
+            "t_minus_24h",
+            "urgent_deadline",
+            "t_minus_2h",
+            "urgent_blocker_reply",
+        )
         if not is_critical and self.quiet_hours.is_quiet(now):
             return False, "quiet_hours"
 
@@ -191,6 +200,7 @@ class DaemonState(BaseModel):
             "task": self.rate_limits.task_cooldown_hours,
             "idea": self.rate_limits.idea_cooldown_hours,
             "collaborator": self.rate_limits.collaborator_cooldown_hours,
+            "email": self.rate_limits.email_cooldown_hours,
             "general": 24,
         }.get(item_type, 48)
 
@@ -215,7 +225,7 @@ class DaemonState(BaseModel):
     def record_notification(
         self,
         item_id: str,
-        item_type: Literal["task", "idea", "collaborator", "general"],
+        item_type: Literal["task", "idea", "collaborator", "email", "general"],
         urgency_tier: str,
         reason: str,
         now_dt: datetime | None = None,

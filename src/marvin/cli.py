@@ -1736,12 +1736,14 @@ def daemon_group() -> None:
 @click.option("--macos/--no-macos", default=True, help="Send macOS notification banner.")
 @click.option("--dry-run", is_flag=True, help="Evaluate without mutating state or cooldowns.")
 @click.option("--force", "-f", is_flag=True, help="Bypass quiet hours and rate limits.")
+@click.option("--agent/--no-agent", default=False, help="Enable Tier 2 autonomous agentic escalation for complex triage.")
 def daemon_run_once(
     notify: bool,
     console: bool,
     macos: bool,
     dry_run: bool,
     force: bool,
+    agent: bool,
 ) -> None:
     """Run a single evaluation pass for proactive alerts."""
     if not ensure_setup():
@@ -1762,6 +1764,7 @@ def daemon_run_once(
         dry_run=dry_run,
         bypass_filters=force,
         channels=channels,
+        enable_agent=agent,
     )
 
     if squelched and not actionable:
@@ -1795,6 +1798,8 @@ def daemon_status_cmd() -> None:
     table.add_row("Pings Sent Today", f"{state.notifications_sent_today} / {state.rate_limits.max_daily_pings}")
     table.add_row("Task Cooldown", f"{state.rate_limits.task_cooldown_hours} hours")
     table.add_row("Idea Cooldown", f"{state.rate_limits.idea_cooldown_hours} hours")
+    table.add_row("Email Cooldown", f"{state.rate_limits.email_cooldown_hours} hours")
+    table.add_row("Untriaged Emails", str(state.untriaged_emails_count))
 
     styles.console.print(table)
     styles.console.print()
@@ -2296,6 +2301,64 @@ def email_triage_cmd(limit: int, include_all: bool) -> None:
         styles.console.print()
 
     styles.console.print("[bold green]✓ Triage complete![/bold green]\n")
+
+
+@email_group.command("agent-triage")
+@click.argument("email_id", required=False)
+@click.option("--limit", "-n", type=int, default=5, help="Number of emails to triage if no ID provided")
+def email_agent_triage_cmd(email_id: str | None, limit: int) -> None:
+    """Autonomous agentic email triage (Tier 2 Escalation via Gemini/NLU)."""
+    if not ensure_setup():
+        sys.exit(1)
+
+    data_dir = get_data_dir()
+    from marvin.email_client import MicrosoftGraphClient, NotAuthenticatedError, EmailClientError
+    from marvin.email_triage import get_triage_candidates, run_agentic_email_triage
+
+    client = MicrosoftGraphClient(data_dir)
+    if not client.is_logged_in():
+        styles.print_error("Not signed in to Microsoft 365. Run 'marvin email login' first.")
+        sys.exit(1)
+
+    if email_id:
+        styles.console.print(f"\n[bold blue]Running agentic triage on email {email_id}...[/bold blue]")
+        res = run_agentic_email_triage(data_dir, email_id=email_id, client=client)
+        from rich.markup import escape
+        if res.get("status") == "success":
+            styles.print_success(f"Agent triage completed for {email_id}:")
+            for act in res.get("actions_taken", []):
+                styles.console.print(f"  ✓ {escape(act)}")
+        elif res.get("status") == "manual_needed":
+            styles.console.print(f"[yellow]{res.get('message')}[/yellow]")
+        else:
+            styles.print_error(f"Agent triage failed: {res.get('error')}")
+        return
+
+    # Batch agentic triage on unread triage candidates
+    try:
+        candidates = get_triage_candidates(data_dir, client, limit=limit, unread_only=True)
+    except EmailClientError as e:
+        styles.print_error(f"Failed to fetch emails: {e}")
+        sys.exit(1)
+
+    if not candidates:
+        styles.console.print("\n[bold green]Inbox Zero![/bold green] No untriaged emails to process.\n")
+        return
+
+    from rich.markup import escape
+    styles.console.print(f"\n[bold]Starting Marvin Agentic Email Triage[/bold] [dim]({len(candidates)} candidates)[/dim]\n")
+    for candidate in candidates:
+        styles.console.print(f"Evaluating: [bold]{candidate.email.subject[:45]}[/bold] from [cyan]{candidate.email.sender.display() if candidate.email.sender else 'unknown'}[/cyan]")
+        res = run_agentic_email_triage(data_dir, candidate=candidate, client=client)
+        if res.get("status") == "success":
+            styles.print_success("  Agent executed actions:")
+            for act in res.get("actions_taken", []):
+                styles.console.print(f"    ✓ {escape(act)}")
+        elif res.get("status") == "manual_needed":
+            styles.console.print(f"  [yellow]{res.get('message')}[/yellow]")
+        else:
+            styles.console.print(f"  [red]Triage skipped/failed: {res.get('error')}[/red]")
+        styles.console.print()
 
 
 @email_group.command("logout")
